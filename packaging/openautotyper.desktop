@@ -1,0 +1,12 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=OpenAutoTyper
+GenericName=Auto Typer
+Comment=Type text into the focused window as real keystrokes
+Exec=openautotyper-gui
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=type;typing;keyboard;automation;paste;
+StartupWMClass=OpenAutoTyper

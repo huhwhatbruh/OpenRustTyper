@@ -1,0 +1,12 @@
+# Let members of the "input" group create virtual keyboards.
+#
+# Without this, /dev/uinput is root-only and OpenAutoTyper cannot type at all
+# on Linux. Install with:
+#
+#   sudo cp packaging/99-openautotyper-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   sudo usermod -aG input "$USER"     # then log out and back in
+#
+# Group "input" also grants read access to /dev/input/event*, which is what
+# the abort key needs in order to work no matter which window has focus.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

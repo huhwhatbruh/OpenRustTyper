@@ -1,62 +1,186 @@
-# OpenAutoTyper v1.0.0
+# OpenAutoTyper 2.0
 
-**OpenAutoTyper** is a highly advanced, semantic auto-typing tool designed for users who need to bypass modern auto-typer detection mechanics. Whether you're pasting data into restricted environments or simulating natural typing, this tool uses sophisticated variance algorithms to emulate authentic human behavior.
+Types text into whatever window has focus, as real keystrokes, at a cadence you
+control.
 
-Created by **[huhwhatbruh](https://github.com/huhwhatbruh)**.
+That is the entire job. There is no browser automation, no network access, no
+model in the loop, and no telemetry. It reads text, it presses keys.
+
+```bash
+openautotyper -f essay.txt --wpm 80      # from a file
+pbpaste | openautotyper --delay 3        # from a pipe
+openautotyper --gui                      # or with a window
+```
 
 ---
 
-## What's New in v1.0.0?
-- **Complete UI Overhaul**: Features a modern, dark-themed GUI built using `customtkinter`.
-- **Advanced Human Emulation Engine**: Moves beyond simple static delays by incorporating Gaussian randomness, typing burst bursts, micro-hesitations, and word-level pauses.
-- **Cross-Platform Compatibility**: Native support out-of-the-box for Windows and Linux, complete with dynamic cross-platform typography and Unicode character clipboard injection.
-- **Live ETA & Word Counts**: Monitor exactly how long it takes to finish typing your pasted text directly from the dashboard.
-- **Robust Exception Handling**: Failsafes and fallback mechanics prevent app crashes even during complex multi-thread typing sequences.
+## Why 2.0 is a rewrite rather than a patch
 
-## The Human-Realistic Engine
+v1.0 was built on `pyautogui`, which types through **XTEST** — an X11 protocol
+extension. On a Wayland session XTEST still appears to work, because XWayland is
+running, but the keystrokes only reach XWayland clients. Aim them at a native
+Wayland window — KDE's own apps, Firefox or Chromium in Wayland mode, anything
+Electron since 2023 — and they land nowhere at all.
 
-Unlike traditional scripts that use a fixed `interval`, OpenAutoTyper simulates *you*:
+That one fact accounts for most of what got reported as "laggy", "drops
+characters" and "sometimes just does nothing". Wayland is the default session on
+Fedora, Ubuntu, and every current KDE and GNOME spin, so for a growing share of
+users v1 could not have worked.
 
-*   **Gaussian Variance Delay**: Your keystrokes randomly fluctuate based on a bell-curve (Gaussian) distribution, mapping perfectly to how human hands type faster for some characters and slower for others.
-*   **Word-Level Pauses ("Realistic Mode")**: Simulates a human "thinking." It groups characters by word, reading the text before typing. You can define a percentage chance that the typer will naturally "pause" between sentences and words, adjusting the max length of these pauses yourself.
-*   **Burst Typing**: The typer recognizes over 50 of the most commonly typed English words ("the", "and", "because", "but"). When encountering them, it switches into "burst speed," reproducing how people memorize and rapidly type short conjunctions.
-*   **WPM Drift**: Over long stretches of text, a person's typing speed "drifts." OpenAutoTyper naturally drifts its WPM baseline ±20% every handful of paragraphs. 
+v2 types through a **virtual keyboard on `/dev/uinput`** instead. The kernel
+presents it as a real keyboard, so the compositor routes its events like any
+other keyboard's — on Wayland, on X11, and in a plain TTY.
+
+Run `openautotyper --doctor` and it will tell you exactly what your machine can
+do and what to fix if something is missing.
+
+### Also fixed along the way
+
+| v1 | v2 |
+|---|---|
+| ETA was `characters × interval`, ignoring every pause — routinely 40% out | The WPM dial is calibrated: the estimate is exact by construction |
+| `time.sleep()` in a loop, accumulating scheduler drift | Deadline-based pacing; measured within 0.5% over a full run |
+| Stop meant `Process.terminate()`, which could leave Shift or Ctrl **physically held** | Cooperative stop, with an unconditional modifier release on every exit path |
+| Abort was "fling the mouse into a screen corner", via the same X11 path that may be dead | A real abort key read from `/dev/input`, working regardless of focus |
+| Gaussian delays, clamped — piling up at the clamp in a way no hand produces | Lognormal intervals, which is the distribution real keystrokes follow |
+| One character at a time through the clipboard for anything non-ASCII, destroying what you had copied | Typographic characters fold to ASCII; the clipboard is a last resort, and it is restored |
+| Hardcoded US QWERTY assumptions | The active XKB layout is compiled and queried, so non-US layouts type correctly |
+| 830 lines in one file, no tests | A package with 133 tests |
 
 ---
 
-## Installation
+## Install
 
-### Requirements
-- Python 3.x
+Requires Python 3.11 or newer.
 
-### Dependencies
-Install the required python packages using PIP:
 ```bash
-pip install customtkinter pyautogui pyperclip
+pip install openautotyper          # engine + CLI
+pip install openautotyper[gui]     # ...and the graphical interface
 ```
 
-**Note for Linux users:**
-If your environment does not have native clipboard CLI drivers (needed for `pyperclip`), you must install either `xclip` or `xsel`:
-*   *Arch:* `sudo pacman -S xclip`
-*   *Debian/Ubuntu:* `sudo apt install xclip`
+### Linux: one-time permission setup
 
-## Usage
+Creating a virtual keyboard needs write access to `/dev/uinput`, and the abort
+key needs read access to `/dev/input/event*`. Both come with the `input` group:
 
-Launch the modernized graphical interface with:
 ```bash
-python autoTyperGUI.py
+sudo cp packaging/99-openautotyper-uinput.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input "$USER"
 ```
 
-### Parameters Guide
-- **Initial Delay (sec)**: The countdown time before the app starts taking over your keyboard.
-- **Keystroke Interval (sec)**: The mathematical baseline interval per character (e.g., `0.06`).
-- **Pause Chance (%)**: In Realistic Mode, the % likelihood that the typing will "stop to think" after finishing a full word.
-- **Max Pause (sec)**: The upper limit to how long the script will randomly pause between those words.
+Log out and back in, then check with `openautotyper --doctor`.
 
-*Emergency Stop:* Simply whip your mouse to any of the 4 direct corners of your screen. PyAutoGUI's built-in `FAILSAFE` mechanism will instantly terminate the typing sequence.
+No setup is needed on Windows or macOS — except that macOS requires
+Accessibility permission for the terminal or app you launch from
+(System Settings → Privacy & Security → Accessibility).
+
+---
+
+## Using it
+
+```
+openautotyper [source] [options]
+```
+
+The text comes from `--file`, `--text`, `--clipboard`, or standard input.
+
+| Option | |
+|---|---|
+| `--wpm N` | Words per minute, measured end to end. Default 70. |
+| `--delay SECS` | Countdown before typing starts, to focus the target window. Default 5. |
+| `--dry-run` | Print what would be typed, and how long it would take. Types nothing. |
+| `--flat` | Perfect metronome — zero every rhythm setting. |
+| `--typos RATE` | Mistype and correct, 0 to 0.25. The finished text is identical. |
+| `--panic-key KEY` | What aborts, e.g. `KEY_ESC` (default) or `KEY_F12`. |
+| `--any-key-stops` | Abort the moment you touch the keyboard. |
+| `--doctor` | Diagnose this machine's setup. |
+
+`--variance`, `--rhythm`, `--hesitation`, `--sentence-pause`, `--max-pause` and
+`--drift` change the character of the typing. None of them changes its speed;
+see below.
+
+Settings persist in `~/.config/openautotyper/config.toml`. Command-line flags
+override the file for that run.
+
+### Stopping
+
+Press **Esc** on your keyboard. It is read directly from the input devices
+rather than registered with the desktop, so it works no matter which window has
+focus, and on Wayland, where applications cannot register global hotkeys at all.
+
+`Ctrl+C` in the terminal and the Stop button in the GUI both work too. Whichever
+you use, every modifier is released before the program lets go of the keyboard.
+
+---
+
+## The cadence model
+
+Four things are true of people at keyboards, and the model implements each:
+
+- **Intervals are lognormal.** The distribution has a hard floor, a dense body
+  and a long right tail. Sampling a Gaussian and clamping it — v1's approach —
+  produces a spike at the clamp that no hand makes.
+- **Finger travel dominates rhythm.** Consecutive keys struck by the same finger
+  are much slower than keys that alternate hands. This is the largest single
+  source of texture in real typing, and it is why `ed` takes longer than `th`.
+- **Speed wanders and reverts.** An Ornstein–Uhlenbeck walk drifts the baseline
+  without letting it escape the rate you asked for. Independent draws give a
+  twitch instead.
+- **Pauses cluster at syntax.** After sentences, around paragraphs — not spread
+  evenly across words.
+
+**The WPM dial is honest.** Every setting above shapes the rhythm; none of them
+moves the average. The finished schedule is scaled to the rate you asked for, so
+70 wpm means 70 wpm end to end, pauses and corrections included — and the ETA is
+therefore closed-form arithmetic rather than a guess. There is a test for it.
+
+---
+
+## Architecture
+
+```
+openautotyper/
+  text.py          normalization: line endings, typography, zero-width characters
+  timing.py        the cadence model — pure functions, no I/O
+  clock.py         drift-corrected, interruptible pacing
+  session.py       countdown, keystrokes, progress, guaranteed cleanup
+  panic.py         the abort key, read straight from /dev/input
+  config.py        settings, as TOML you can edit by hand
+  cli.py           the command line
+  backends/
+    xkb.py         compiles the active keyboard layout into a keystroke table
+    linux_uinput.py  virtual keyboard — Wayland, X11, TTY
+    linux_x11.py     XTEST — X11 only, and it says so
+    windows.py       SendInput with Unicode events
+    macos.py         Quartz CGEvent
+    null.py          types into a string, for --dry-run and the tests
+  gui/             PySide6 interface
+```
+
+The engine, the CLI and every backend outside Linux run on the standard library
+alone. Linux needs `evdev`; the GUI needs `PySide6`. Nothing else.
+
+```bash
+pip install -e ".[gui,dev]"
+pytest
+```
+
+---
+
+## Scope
+
+This types text. It does not know what it is typing into, and it has no
+awareness of any particular website or application.
+
+If you are using it somewhere with rules about how work gets produced — a
+course, an exam, an employer's systems — those rules are yours to follow, and a
+tool cannot settle that for you.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - open sourced for the community.
+MIT. See [LICENSE](LICENSE).
+
+Created by [huhwhatbruh](https://github.com/huhwhatbruh).
