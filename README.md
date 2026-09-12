@@ -58,10 +58,21 @@ pip install openautotyper          # engine + CLI
 pip install openautotyper[gui]     # ...and the graphical interface
 ```
 
+### Arch Linux
+
+A `PKGBUILD` is in `packaging/`. It installs the udev rule and the desktop
+entry for you, so the only step left is the `input` group:
+
+```bash
+cd packaging && makepkg -si
+sudo usermod -aG input "$USER"
+```
+
 ### Linux: one-time permission setup
 
 Creating a virtual keyboard needs write access to `/dev/uinput`, and the abort
-key needs read access to `/dev/input/event*`. Both come with the `input` group:
+key needs read access to `/dev/input/event*`. Both come with the `input` group.
+The Arch package does the first half; everywhere else, do it by hand:
 
 ```bash
 sudo cp packaging/99-openautotyper-uinput.rules /etc/udev/rules.d/

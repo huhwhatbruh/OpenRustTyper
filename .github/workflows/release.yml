@@ -21,6 +21,37 @@ jobs:
           name: dist
           path: dist/
 
+  archpkg:
+    name: Arch package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            python-build python-installer python-hatchling python-wheel \
+            python-pytest python-evdev namcap sudo pacman-contrib
+
+      # makepkg refuses to run as root, so give it an unprivileged user.
+      - name: Build
+        run: |
+          useradd -m builder
+          cp packaging/PKGBUILD packaging/openautotyper.install /home/builder/
+          chown -R builder:builder /home/builder
+          # The PKGBUILD ships sha256sums=('SKIP'); pin it to the tarball this
+          # release actually published before anything is built from it.
+          sudo -u builder bash -lc 'cd ~ && updpkgsums && makepkg --noconfirm'
+
+      - name: Lint the built package
+        run: sudo -u builder bash -lc 'cd ~ && namcap PKGBUILD *.pkg.tar.zst' || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenAutoTyper-arch
+          path: /home/builder/*.pkg.tar.zst
+
   executable:
     name: Standalone · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

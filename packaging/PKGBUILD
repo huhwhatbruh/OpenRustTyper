@@ -1,0 +1,54 @@
+# Maintainer: huhwhatbruh <https://github.com/huhwhatbruh>
+
+pkgname=openautotyper
+pkgver=2.0.0
+pkgrel=1
+pkgdesc='Type text into the focused window as real keystrokes, at a cadence you control'
+arch=('any')
+url='https://github.com/huhwhatbruh/OpenAutoTyper'
+license=('MIT')
+# evdev is what opens /dev/uinput; without it there is no Linux backend at all.
+depends=('python' 'python-evdev')
+makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel')
+checkdepends=('python-pytest')
+# The clipboard is only a fallback for characters no keystroke can reach, and
+# it is tried in this order: wl-copy, xclip, xsel, then pyperclip.
+optdepends=('pyside6: graphical interface (openautotyper-gui)'
+            'wl-clipboard: clipboard fallback on Wayland'
+            'xclip: clipboard fallback on X11'
+            'xsel: clipboard fallback on X11, alternative to xclip'
+            'python-pyperclip: clipboard fallback of last resort')
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Pinned at release time: the release workflow runs `updpkgsums` against the
+# published tarball before building. Pin this before publishing to the AUR.
+sha256sums=('SKIP')
+
+_srcdir="OpenAutoTyper-$pkgver"
+
+build() {
+  cd "$_srcdir"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$_srcdir"
+  # The uinput suite needs a writable /dev/uinput and the Qt suite needs
+  # PySide6; both skip themselves when absent, which is the normal state of a
+  # clean build chroot. What is left still covers the engine end to end.
+  python -m pytest -q
+}
+
+package() {
+  cd "$_srcdir"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  # A rule shipped by a package belongs in /usr/lib; /etc/udev/rules.d is
+  # reserved for the administrator's own overrides.
+  install -Dm644 packaging/99-openautotyper-uinput.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-openautotyper-uinput.rules"
+  install -Dm644 packaging/openautotyper.desktop \
+    "$pkgdir/usr/share/applications/openautotyper.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
