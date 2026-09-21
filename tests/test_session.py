@@ -155,9 +155,24 @@ def test_a_throwing_progress_callback_does_not_break_typing() -> None:
 
 
 def test_estimate_matches_the_schedule_actually_run() -> None:
+    """The estimate is a sum of the very events that will be typed.
+
+    That is the whole guarantee, and it is stronger than agreeing with the
+    closed-form arithmetic: each run draws its own pace, so the schedule is a
+    few percent either side of the nominal rate and the estimate goes with it
+    rather than reporting the nominal and being wrong.
+    """
+    from openautotyper.timing import Action
+
     session = TypeSession(SAMPLE, Cadence(wpm=80), NullBackend(),
                           countdown=0, panic_key=None)
-    assert session.estimated == pytest.approx(len(SAMPLE) / 5 * 60 / 80)
+    clock = last_press = 0.0
+    for event in session.events:
+        clock += event.delay
+        if event.action is Action.DOWN:
+            last_press = clock
+    assert session.estimated == pytest.approx(last_press)
+    assert session.estimated == pytest.approx(len(SAMPLE) / 5 * 60 / 80, rel=0.12)
 
 
 def test_a_session_cannot_be_started_twice() -> None:
@@ -172,3 +187,89 @@ def test_empty_text_completes_immediately() -> None:
     _, backend, result = run("")
     assert result.state is State.DONE
     assert backend.text == ""
+
+
+# ---------------------------------------------------------------------------
+# The abort key is a safety promise, so a failure to attach must be loud
+# ---------------------------------------------------------------------------
+def test_a_failed_abort_key_is_reported_rather_than_assumed(monkeypatch) -> None:
+    """Typing needs /dev/uinput; the abort key needs /dev/input/event*.
+
+    Those are different permissions, so a machine can type perfectly and have
+    no way to stop. ``watcher.start()``'s return value used to be dropped on
+    the floor: the run went ahead, the caller had already told the user which
+    key to press, and that key did nothing.
+    """
+    import openautotyper.panic as panic
+
+    monkeypatch.setattr(panic.PanicWatcher, "start", lambda self: False)
+    messages: list[str] = []
+    result = TypeSession(
+        "hello", Cadence(wpm=2000), NullBackend(), countdown=0,
+        panic_key="KEY_ESC", progress_hz=0,
+        on_progress=lambda p: messages.append(p.message),
+    ).run()
+
+    assert result.state is State.DONE, "a missing abort key must not fail the run"
+    assert result.panic_active is False
+    assert any("abort key" in m for m in messages), messages
+
+
+def test_a_working_abort_key_is_recorded_as_working(monkeypatch) -> None:
+    import openautotyper.panic as panic
+
+    monkeypatch.setattr(panic.PanicWatcher, "start", lambda self: True)
+    monkeypatch.setattr(panic.PanicWatcher, "stop", lambda self: None)
+    result = TypeSession("hello", Cadence(wpm=2000), NullBackend(), countdown=0,
+                         panic_key="KEY_ESC", progress_hz=0).run()
+    assert result.panic_active is True
+
+
+def test_no_abort_key_asked_for_is_not_a_warning() -> None:
+    result = TypeSession("hello", Cadence(wpm=2000), NullBackend(), countdown=0,
+                         panic_key=None, progress_hz=0).run()
+    assert result.panic_active is True
+
+
+# ---------------------------------------------------------------------------
+# A preview must not take as long as the thing it previews
+# ---------------------------------------------------------------------------
+def test_a_non_realtime_run_does_not_wait_out_the_schedule() -> None:
+    """What --dry-run does. It used to sleep the full simulated duration.
+
+    900 characters at 70 wpm is two and a half minutes of pacing, which the
+    dry run sat through in silence before printing a word.
+    """
+    import time
+
+    text = "The quick brown fox jumps over the lazy dog. " * 20
+    session = TypeSession(text, Cadence(wpm=70), NullBackend(), countdown=0,
+                          panic_key=None, progress_hz=0, realtime=False)
+    assert session.estimated > 60, "the schedule really is minutes long"
+
+    started = time.perf_counter()
+    result = session.run()
+    assert time.perf_counter() - started < 5.0
+    assert result.state is State.DONE
+    assert result.typed == len(text)
+
+
+def test_a_non_realtime_run_types_exactly_the_same_text() -> None:
+    """Speed must not cost fidelity: the preview is the point."""
+    text = 'Fidelity: "quotes", (parens) & 100%!\nSecond line.'
+    fast = NullBackend()
+    TypeSession(text, Cadence(wpm=70, typo_rate=0.05), fast, countdown=0,
+                panic_key=None, progress_hz=0, realtime=False, seed=4).run()
+    paced = NullBackend()
+    TypeSession(text, Cadence(wpm=2000, typo_rate=0.05), paced, countdown=0,
+                panic_key=None, progress_hz=0, seed=4).run()
+    assert fast.text == text
+    assert fast.text == paced.text
+
+
+def test_a_non_realtime_run_is_still_abortable() -> None:
+    session = TypeSession("a" * 5000, Cadence(wpm=70), NullBackend(), countdown=0,
+                          panic_key=None, progress_hz=0, realtime=False)
+    session.stop("changed my mind")
+    result = session.run()
+    assert result.state is State.STOPPED

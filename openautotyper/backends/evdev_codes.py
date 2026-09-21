@@ -36,6 +36,13 @@ KEY_CODES: dict[str, int] = {
     "KEY_LEFTMETA": 125, "KEY_RIGHTMETA": 126, "KEY_COMPOSE": 127,
 }
 
+#: The modifiers a layout may ask to be held. These double as key tokens: the
+#: schedule presses them by name so Shift can lead the letter it modifies.
+MODIFIER_NAMES: tuple[str, ...] = (
+    "KEY_LEFTSHIFT", "KEY_RIGHTSHIFT", "KEY_LEFTCTRL", "KEY_RIGHTCTRL",
+    "KEY_LEFTALT", "KEY_RIGHTALT", "KEY_LEFTMETA", "KEY_RIGHTMETA",
+)
+
 #: Every modifier the typing path may hold, for the panic release.
 MODIFIER_CODES: tuple[int, ...] = (
     KEY_CODES["KEY_LEFTSHIFT"], KEY_CODES["KEY_RIGHTSHIFT"],
@@ -52,3 +59,52 @@ NAMED_KEY_CODES: dict[str, str] = {
     "escape": "KEY_ESC",
     "space": "KEY_SPACE",
 }
+
+
+# ---------------------------------------------------------------------------
+# HID usage codes, for MSC_SCAN
+# ---------------------------------------------------------------------------
+# Every real keyboard emits an ``EV_MSC / MSC_SCAN`` event carrying the raw
+# scancode immediately before each ``EV_KEY``, press and release alike. A
+# device that never does is not a keyboard the kernel has ever driven, and the
+# difference is visible to anything reading evdev directly -- one run of
+# ``libinput debug-events`` shows it.
+#
+# This is ``hid_keyboard[]`` from ``drivers/hid/hid-input.c``, indexed by HID
+# usage and giving the evdev keycode; a USB keyboard reports
+# ``0x70000 | usage``. Inverting it gives the scancode to announce for a key.
+_HID_KEYBOARD: tuple[int, ...] = (
+      0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
+     50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
+      4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
+     27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
+     65, 66, 67, 68, 87, 88, 99, 70, 119, 110, 102, 104, 111, 107, 109, 106,
+    105, 108, 103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
+     72, 73, 82, 83, 86, 127, 116, 117,
+)
+
+#: HID usage page 7 is the keyboard page; a USB keyboard's MSC_SCAN is the
+#: usage with the page in the high bits.
+_HID_KEYBOARD_PAGE = 0x70000
+
+#: Modifier usages live at 0xE0-0xE7, past the block tabulated above.
+_MODIFIER_USAGES: dict[int, int] = {
+    KEY_CODES["KEY_LEFTCTRL"]: 0xE0, KEY_CODES["KEY_LEFTSHIFT"]: 0xE1,
+    KEY_CODES["KEY_LEFTALT"]: 0xE2, KEY_CODES["KEY_LEFTMETA"]: 0xE3,
+    KEY_CODES["KEY_RIGHTCTRL"]: 0xE4, KEY_CODES["KEY_RIGHTSHIFT"]: 0xE5,
+    KEY_CODES["KEY_RIGHTALT"]: 0xE6, KEY_CODES["KEY_RIGHTMETA"]: 0xE7,
+}
+
+
+def _build_scancodes() -> dict[int, int]:
+    out = dict(_MODIFIER_USAGES)
+    for usage, keycode in enumerate(_HID_KEYBOARD):
+        # The table repeats a keycode for two usages in one place (Backslash
+        # and the ISO hash key); the first wins, as it does on real hardware.
+        if keycode and keycode not in out:
+            out[keycode] = usage
+    return {code: _HID_KEYBOARD_PAGE | usage for code, usage in out.items()}
+
+
+#: evdev keycode -> the MSC_SCAN value a USB keyboard would report for it.
+SCANCODES: dict[int, int] = _build_scancodes()

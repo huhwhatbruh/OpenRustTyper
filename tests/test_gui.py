@@ -98,3 +98,24 @@ def test_both_palettes_produce_a_complete_stylesheet() -> None:
         sheet = theme.stylesheet(theme.for_system(dark))
         assert "QPlainTextEdit" in sheet and "QPushButton" in sheet
         assert "{{" not in sheet and "}}" not in sheet  # no unescaped braces
+
+
+def test_the_window_does_not_promise_an_abort_key_it_cannot_deliver(
+    window, monkeypatch
+) -> None:
+    """Typing needs /dev/uinput; stopping needs /dev/input/event*.
+
+    Different permissions, so the window can be able to type and unable to
+    stop. It used to say "Press Esc at any time to stop" either way.
+    """
+    import openautotyper.panic as panic
+
+    monkeypatch.setattr(panic, "available", lambda: (False, "no readable devices"))
+    window._refresh_footer()
+    text = window.status_label.text()
+    assert "No abort key" in text and "no readable devices" in text
+    assert "Press Esc" not in text
+
+    monkeypatch.setattr(panic, "available", lambda: (True, "watching 3 device(s)"))
+    window._refresh_footer()
+    assert "stop" in window.status_label.text().lower()

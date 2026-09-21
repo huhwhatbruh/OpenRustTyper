@@ -32,11 +32,57 @@ def presses(events):
 # ---------------------------------------------------------------------------
 # Speed
 # ---------------------------------------------------------------------------
+def _delivered(text: str, cadence: Cadence, seed: int) -> float:
+    span = typing_duration(plan(text, cadence, seed=seed))
+    return len(text) / 5.0 / (span / 60.0)
+
+
 @pytest.mark.parametrize("wpm", [15, 40, 70, 120, 250, 600])
-def test_wpm_is_delivered_exactly(wpm: int) -> None:
-    """Whatever shapes the rhythm, the average must hit the requested rate."""
-    span = typing_duration(plan(SAMPLE, Cadence(wpm=wpm), seed=7))
-    assert len(SAMPLE) / 5.0 / (span / 60.0) == pytest.approx(wpm, rel=1e-6)
+def test_wpm_is_delivered_to_within_a_few_percent(wpm: int) -> None:
+    """Whatever shapes the rhythm, the rate must be the one that was asked for.
+
+    Not to the microsecond, though: see the run-to-run test below. Each run
+    draws its own pace for the day, so the dial is honest within a few percent
+    rather than exact, which is the difference between a setting and a
+    fingerprint.
+    """
+    for seed in range(12):
+        assert _delivered(SAMPLE, Cadence(wpm=wpm), seed) == pytest.approx(
+            wpm, rel=0.12
+        )
+
+
+@pytest.mark.parametrize("wpm", [40, 70, 120])
+def test_the_requested_rate_is_what_runs_average_to(wpm: int) -> None:
+    """The per-run wobble is symmetric: it must not bias the dial."""
+    rates = [_delivered(SAMPLE, Cadence(wpm=wpm), seed) for seed in range(60)]
+    assert statistics.mean(rates) == pytest.approx(wpm, rel=0.02)
+
+
+def test_two_runs_of_one_text_do_not_take_the_same_time() -> None:
+    """The flatness that no amount of internal jitter hid.
+
+    Normalising every schedule to the requested rate made total duration a
+    function of (length, wpm) and nothing else -- 514.285714 seconds on every
+    seed, identical to the microsecond. Within a run the rhythm was different
+    every time; across runs it could not be. A passage typed twice in exactly
+    the same number of microseconds was not typed.
+    """
+    spans = {
+        round(typing_duration(plan(SAMPLE, Cadence(wpm=70), seed=seed)), 6)
+        for seed in range(20)
+    }
+    assert len(spans) == 20, "runs are sharing a duration"
+    spread = (max(spans) - min(spans)) / statistics.mean(spans)
+    assert 0.02 < spread < 0.40, spread
+
+
+def test_a_metronome_stays_exact() -> None:
+    """Asking for no wander at all means the rate is a setting again."""
+    flat = Cadence(wpm=70, variance=0, rhythm=0, hesitation=0,
+                   sentence_pause=0, drift=0, dwell_variance=0)
+    for seed in (1, 2, 3):
+        assert _delivered(SAMPLE, flat, seed) == pytest.approx(70, rel=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -52,8 +98,9 @@ def test_wpm_is_delivered_exactly(wpm: int) -> None:
     ],
 )
 def test_shape_knobs_do_not_move_the_average(cadence: Cadence) -> None:
-    span = typing_duration(plan(SAMPLE, cadence, seed=11))
-    assert len(SAMPLE) / 5.0 / (span / 60.0) == pytest.approx(70, rel=1e-6)
+    """These change the character of the typing, never its speed."""
+    rates = [_delivered(SAMPLE, cadence, seed) for seed in range(40)]
+    assert statistics.mean(rates) == pytest.approx(70, rel=0.02)
 
 
 def test_the_full_stream_outlasts_typing_by_one_hold(cadence=None) -> None:
@@ -244,3 +291,147 @@ def test_invalid_cadence_is_rejected(bad: Cadence) -> None:
 )
 def test_duration_formatting(seconds: float, expected: str) -> None:
     assert format_duration(seconds) == expected
+
+
+# ---------------------------------------------------------------------------
+# Modifiers are keystrokes
+# ---------------------------------------------------------------------------
+# Left to the backend, Shift went down in the same instant as the letter it
+# modified -- measured on the wire at 0.013-0.04 ms of lead, where a hand gives
+# 50-150. A page listening for keydown sees the two events share a timestamp,
+# which is a thing no keyboard produces.
+_SHIFT = "KEY_LEFTSHIFT"
+
+
+def _us_modifiers(token: str) -> tuple[str, ...]:
+    """A stand-in for a keyboard layout: shift for capitals and for !?:."""
+    if len(token) != 1:
+        return ()
+    return (_SHIFT,) if token.isupper() or token in '!?:"' else ()
+
+
+def _absolute(events):
+    """(time, action, value) for each event, on one clock."""
+    clock = 0.0
+    out = []
+    for event in events:
+        clock += event.delay
+        out.append((clock, event.action, event.value))
+    return out
+
+
+def _modifier_spans(events) -> list[tuple[float, float]]:
+    spans, down = [], None
+    for moment, action, value in _absolute(events):
+        if value != _SHIFT:
+            continue
+        if action is Action.DOWN:
+            down = moment
+        elif down is not None:
+            spans.append((down, moment))
+            down = None
+    return spans
+
+
+def test_without_a_layout_no_modifier_is_scheduled() -> None:
+    """The old behaviour stays available: the backend presses them itself."""
+    events = plan("ABC", Cadence(wpm=70), seed=1)
+    assert not [e for e in events if e.value == _SHIFT]
+
+
+def test_shift_leads_the_key_it_modifies_by_a_human_margin() -> None:
+    events = plan("Aa Bb Cc Dd Ee Ff Gg Hh", Cadence(wpm=70), seed=3,
+                  modifiers_of=_us_modifiers)
+    timeline = _absolute(events)
+    leads = []
+    for start, _end in _modifier_spans(events):
+        first = next(
+            moment for moment, action, value in timeline
+            if action is Action.DOWN and value != _SHIFT and moment > start
+        )
+        leads.append(first - start)
+    assert leads, "no modifier was scheduled"
+    assert all(0.015 < lead < 0.40 for lead in leads), leads
+    assert 0.04 < statistics.mean(leads) < 0.15, statistics.mean(leads)
+
+
+def test_shift_is_still_held_after_the_key_it_modified_is_released() -> None:
+    """A hand does not lift both fingers together."""
+    events = plan("Aa Bb Cc Dd", Cadence(wpm=70), seed=5,
+                  modifiers_of=_us_modifiers)
+    timeline = _absolute(events)
+    lags = []
+    for _start, end in _modifier_spans(events):
+        released = [
+            moment for moment, action, value in timeline
+            if action is Action.UP and value != _SHIFT and moment < end
+        ]
+        if released:
+            lags.append(end - max(released))
+    assert lags and any(lag > 0.005 for lag in lags), lags
+
+
+def test_a_run_of_capitals_holds_one_continuous_shift() -> None:
+    spans = _modifier_spans(
+        plan("ABCDEF gh", Cadence(wpm=70), seed=2, modifiers_of=_us_modifiers)
+    )
+    assert len(spans) == 1, spans
+
+
+def test_shift_is_never_held_over_a_character_that_did_not_ask_for_it() -> None:
+    """The correctness half. A modifier that outlives its run changes the text.
+
+    Shift may lift while the capital is still physically down -- the character
+    was decided when the key went down -- but it must be gone before the next
+    unshifted key is pressed, or "Ab" arrives as "AB".
+    """
+    text = 'Hello World! "Quoted" Xy: Zz? ABCdef Ghi'
+    events = plan(text, Cadence(wpm=70), seed=9, modifiers_of=_us_modifiers)
+    spans = _modifier_spans(events)
+    for moment, action, value in _absolute(events):
+        if action is not Action.DOWN or value == _SHIFT:
+            continue
+        held = any(start <= moment <= end for start, end in spans)
+        assert held == bool(_us_modifiers(value)), (value, moment, held)
+
+
+def test_shift_never_precedes_the_start_of_the_schedule() -> None:
+    for text in ("A", "Ab", "!"):
+        events = plan(text, Cadence(wpm=70), seed=1, modifiers_of=_us_modifiers)
+        assert all(event.delay >= 0.0 for event in events), text
+
+
+# ---------------------------------------------------------------------------
+# Trend across a document
+# ---------------------------------------------------------------------------
+def test_typing_starts_slow_and_ends_slower_than_its_middle() -> None:
+    """A flat pace across three thousand characters is not a person.
+
+    The Ornstein-Uhlenbeck walk wanders but reverts, so before this the first
+    and last thirds of a long document came out 173.1 ms and 175.7 ms apart --
+    which is to say identical.
+    """
+    text = ("The quick brown fox jumps over the lazy dog. "
+            "Pack my box with five dozen liquor jugs. ") * 45
+    intervals = stroke_stats(plan(text, Cadence(wpm=70), seed=4)).interval
+    third = len(intervals) // 3
+    start = statistics.mean(intervals[:third // 2])
+    middle = statistics.mean(intervals[third:2 * third])
+    end = statistics.mean(intervals[-third:])
+    assert start > middle * 1.02, (start, middle)
+    assert end > middle * 1.01, (end, middle)
+
+
+def test_the_trend_is_shape_and_not_speed() -> None:
+    """Warm-up and fatigue must not cost the document its requested rate."""
+    text = "The quick brown fox jumps over the lazy dog. " * 45
+    rates = [_delivered(text, Cadence(wpm=70), seed) for seed in range(30)]
+    assert statistics.mean(rates) == pytest.approx(70, rel=0.02)
+
+
+def test_no_drift_means_no_trend() -> None:
+    text = "the quick brown fox jumps over the lazy dog " * 40
+    flat = Cadence(wpm=70, variance=0, rhythm=0, hesitation=0,
+                   sentence_pause=0, drift=0, dwell_variance=0)
+    intervals = stroke_stats(plan(text, flat, seed=1)).interval
+    assert max(intervals) - min(intervals) < 1e-9

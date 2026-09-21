@@ -18,8 +18,6 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: Microsoft :: Windows",
-    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -27,10 +25,9 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-# The engine, the CLI and every backend on Windows and macOS run on the
-# standard library alone. Linux needs evdev to open /dev/uinput; the GUI is
-# the only genuinely optional extra.
-dependencies = ["evdev>=1.6; sys_platform == 'linux'"]
+# The engine, the cadence model and the CLI run on the standard library alone;
+# evdev is what opens /dev/uinput. The GUI is the only optional extra.
+dependencies = ["evdev>=1.6"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.5"]

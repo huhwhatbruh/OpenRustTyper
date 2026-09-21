@@ -1,12 +1,20 @@
-#!/usr/bin/env xdg-open
 [Desktop Entry]
 Type=Application
 Name=OpenAutoTyper
 GenericName=Auto Typer
 Comment=Type text into the focused window as real keystrokes
+# TryExec is how the spec says "hide this launcher if the program is absent".
+# Without it, a menu entry for a GUI whose Qt bindings are missing is a button
+# that does nothing at all: the traceback goes to a terminal Terminal=false
+# never opens.
+TryExec=openautotyper-gui
 Exec=openautotyper-gui
-Icon=input-keyboard
+Icon=openautotyper
 Terminal=false
+# Qt sets the Wayland app_id from setDesktopFileName("openautotyper"), which
+# matches this file's name; StartupWMClass covers X11 and XWayland, where the
+# WM_CLASS is ("openautotyper-gui", "OpenAutoTyper").
+StartupWMClass=OpenAutoTyper
+StartupNotify=true
 Categories=Utility;Accessibility;
 Keywords=type;typing;keyboard;automation;paste;
-StartupWMClass=OpenAutoTyper

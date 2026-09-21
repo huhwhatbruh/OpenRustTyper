@@ -41,13 +41,26 @@ class Backend(ABC):
     def open(self) -> None:
         """Acquire the device. Raises :class:`BackendError` on failure."""
 
+    def modifiers_for(self, token: str) -> tuple[str, ...]:
+        """Which modifiers must be held to produce ``token``.
+
+        The answer depends on the keyboard layout, so only a backend can give
+        it. The cadence model uses it to schedule Shift and AltGr as keystrokes
+        in their own right, with the lead and lag a hand gives them; a backend
+        that returns nothing simply has them pressed with the key instead.
+
+        The names returned are valid ``token`` arguments to :meth:`key_down`.
+        """
+        return ()
+
     @abstractmethod
     def key_down(self, token: str) -> bool:
         """Press and hold one key.
 
-        ``token`` is a single character, or one of :data:`NAMED_KEYS`. Returns
-        False if this keyboard layout cannot reach it, in which case the caller
-        falls back to the clipboard rather than pressing something else.
+        ``token`` is a single character, one of :data:`NAMED_KEYS`, or a
+        modifier name from :meth:`modifiers_for`. Returns False if this
+        keyboard layout cannot reach it, in which case the caller falls back to
+        the clipboard rather than pressing something else.
         """
 
     @abstractmethod

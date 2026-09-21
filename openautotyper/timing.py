@@ -23,8 +23,13 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
+
+#: Answers "which modifiers does this character need", in backend key names.
+#: Only the active keyboard layout knows, and this module does not import one.
+ModifiersOf = Callable[[str], tuple[str, ...]]
 
 # ---------------------------------------------------------------------------
 # Physical keyboard geometry
@@ -100,6 +105,38 @@ _CHUNKED = frozenset(
 
 _SENTENCE_END = frozenset(".!?")
 _CLAUSE_END = frozenset(",;:")
+
+# ---------------------------------------------------------------------------
+# Trend across a document, and across runs
+# ---------------------------------------------------------------------------
+# The Ornstein-Uhlenbeck walk reverts to a fixed mean, which makes the pace
+# wander but never *go* anywhere: over three thousand characters the first
+# third and the last third came out 173.1 ms and 175.7 ms apart, which is to
+# say identical. A person does not type a long document at a flat rate. They
+# start below their own pace and find it over the first paragraph or two, and
+# they give some of it back by the end. Both are slow enough to be invisible
+# in any one interval and obvious in the trend of several thousand.
+
+#: How much slower than the settled pace the very first keystrokes are.
+_WARMUP_EXCESS = 0.10
+#: Characters over which the warm-up decays; roughly a paragraph.
+_WARMUP_SCALE = 180.0
+#: How much slower the pace has become by the time fatigue is fully felt.
+_FATIGUE_EXCESS = 0.06
+#: Characters before fatigue has arrived in full -- a few pages.
+_FATIGUE_ONSET = 1500.0
+
+# A second flatness, less obvious and more damning: the total. Because the
+# schedule is normalised to the requested rate, one document at one setting
+# took 514.285714 seconds on every seed tried -- the same figure to the
+# microsecond, run after run. The rhythm inside differed every time; the sum
+# could not. Nobody types a passage twice in the same length of time, and two
+# runs that agree to seven figures agree because neither was typed.
+
+#: Spread of the per-run pace, as the sigma of a lognormal on total duration.
+#: Small enough that the words-per-minute dial still means what it says, large
+#: enough that no two runs land on the same number.
+_RUN_TO_RUN = 0.035
 
 
 class Action(IntEnum):
@@ -225,6 +262,14 @@ _FINGER_DWELL = {
 #: The shortest hold that still registers reliably as a keypress.
 _MIN_DWELL = 0.004
 
+#: The longest a key may be held. Two reasons, and they agree on the number.
+#: Prose typing simply does not hold a key a fifth of a second -- the tail of
+#: the lognormal reaches there, but a hand does not. And the virtual keyboard
+#: declares autorepeat, as a keyboard must; past the kernel's 250 ms repeat
+#: delay the key would start duplicating itself, turning a long hold into a
+#: character the text never contained. Clamping here keeps both honest.
+MAX_DWELL = 0.200
+
 
 def _geometry_of(value: str) -> tuple[int, int, int, bool] | None:
     if len(value) != 1:
@@ -343,6 +388,13 @@ def _plan_presses(
     chunk_factor = 1.0
     chunk_until = -1
 
+    # Both trends are scaled by `drift`, which is the dial for "how much does
+    # the pace wander"; at zero the model is a metronome and stays one. And
+    # both are shape, not speed: _calibrate normalises the mean away again, so
+    # the document still takes as long as the WPM says.
+    warmup = _WARMUP_EXCESS * cadence.drift
+    fatigue = _FATIGUE_EXCESS * cadence.drift
+
     while i < n:
         ch = text[i]
 
@@ -356,11 +408,16 @@ def _plan_presses(
         z += -theta * z + vol * rng.gauss(0.0, 1.0)
         prev = text[i - 1] if i > 0 else None
 
+        trend = 1.0 + warmup * math.exp(-i / _WARMUP_SCALE) + fatigue * min(
+            1.0, i / _FATIGUE_ONSET
+        )
+
         interval = (
             mean
             * math.exp(z + rng.gauss(mu_correction, sigma))
             * _digraph_factor(prev, ch, cadence.rhythm)
             * chunk_factor
+            * trend
         )
 
         if rng.random() < cadence.hesitation:
@@ -394,11 +451,19 @@ def _plan_presses(
     return presses
 
 
-def _calibrate(presses: list[_Press], text: str, cadence: Cadence) -> list[_Press]:
+def _calibrate(
+    presses: list[_Press], text: str, cadence: Cadence, rng: random.Random
+) -> list[_Press]:
     """Scale the schedule so the requested words-per-minute is what happens.
 
     Every multiplier in the model shapes the rhythm; none of them should move
     the average, or the WPM dial would be a suggestion rather than a setting.
+
+    Not *quite* none, though. Normalising to the exact requested rate made the
+    total duration a function of the text and the dial alone, identical to the
+    microsecond on every run -- a fingerprint across runs rather than within
+    one. So the day's pace is drawn once per schedule and the rate is delivered
+    to within a few percent rather than to seven figures.
     """
     total = sum(p.interval for p in presses)
     if total <= 0.0:
@@ -406,6 +471,8 @@ def _calibrate(presses: list[_Press], text: str, cadence: Cadence) -> list[_Pres
     # The target spans press to press: producing the text is what is being
     # timed, not the release of its final key.
     target = len(text) / 5.0 * 60.0 / cadence.wpm
+    if cadence.drift > 0.0:
+        target *= math.exp(rng.gauss(0.0, _RUN_TO_RUN * cadence.drift))
     scale = target / total
     return [
         _Press(max(p.interval * scale, 0.0005), p.value, p.index) for p in presses
@@ -427,7 +494,7 @@ def _release_times(
         hold = mean * _dwell_factor(press.value) * math.exp(
             rng.gauss(mu_correction, sigma)
         )
-        release = press_at[i] + max(hold, _MIN_DWELL)
+        release = press_at[i] + min(max(hold, _MIN_DWELL), MAX_DWELL)
 
         if i + 1 < n:
             nxt = presses[i + 1]
@@ -468,12 +535,117 @@ def _release_times(
     return release_at
 
 
-def plan(text: str, cadence: Cadence, *, seed: int | None = None) -> list[Event]:
+
+# ---------------------------------------------------------------------------
+# Modifiers are keystrokes too
+# ---------------------------------------------------------------------------
+# A capital letter is two key presses, and the first one is the tell. Left to
+# the backend, Shift went down in the same breath as the letter it modified:
+# measured on the wire, a lead of 0.013-0.04 ms. A hand cannot do that. Shift
+# is a separate finger starting a separate movement, and it arrives well ahead
+# -- 50 to 150 ms is the ordinary range -- then lingers past the letter's own
+# release. A page listening for keydown sees the two events share a timestamp,
+# which is a signature nothing else produces.
+#
+# So modifiers are scheduled here, alongside the characters, instead of being
+# an implementation detail of the device. Which modifier a character needs
+# depends on the keyboard layout, which this module deliberately knows nothing
+# about, so the caller passes a function that answers it.
+
+#: Mean seconds a modifier goes down before the key it modifies.
+_MODIFIER_LEAD = 0.075
+#: Spread of that lead, as the sigma of a lognormal.
+_MODIFIER_LEAD_SIGMA = 0.42
+#: Mean seconds a modifier stays down after the last key that needed it.
+_MODIFIER_LAG = 0.048
+_MODIFIER_LAG_SIGMA = 0.40
+#: The smallest ordering gap worth preserving between two transitions.
+_EPSILON = 0.002
+
+
+def _modifier_runs(
+    presses: list[_Press], modifiers_of: ModifiersOf
+) -> list[tuple[str, int, int]]:
+    """Maximal runs of consecutive presses that all want one modifier.
+
+    A run of capitals is one continuous Shift, not a press per letter, so the
+    grouping has to happen before any timing is decided.
+    """
+    wanted = [frozenset(modifiers_of(press.value)) for press in presses]
+    runs: list[tuple[str, int, int]] = []
+    for name in sorted({m for group in wanted for m in group}):
+        start: int | None = None
+        for i, group in enumerate(wanted):
+            if name in group:
+                if start is None:
+                    start = i
+            elif start is not None:
+                runs.append((name, start, i - 1))
+                start = None
+        if start is not None:
+            runs.append((name, start, len(presses) - 1))
+    return runs
+
+
+def _schedule_modifiers(
+    presses: list[_Press],
+    press_at: list[float],
+    release_at: list[float],
+    modifiers_of: ModifiersOf,
+    rng: random.Random,
+) -> list[tuple[float, Action, str, int]]:
+    """Place each modifier's own press and release on the timeline.
+
+    Every clamp here is correctness rather than realism. A modifier that lands
+    after the key it modifies produces the unmodified character; one that
+    outlives its run modifies a character that did not ask for it, which is
+    the bug that turned "Second" into "SEcond" -- only now it would be the
+    schedule making it rather than the backend.
+    """
+    events: list[tuple[float, Action, str, int]] = []
+    for name, first, last in _modifier_runs(presses, modifiers_of):
+        lead = _MODIFIER_LEAD * math.exp(rng.gauss(0.0, _MODIFIER_LEAD_SIGMA))
+        down = press_at[first] - lead
+        # Reaching for Shift begins after the previous keystroke has begun,
+        # not before it -- but it may well overlap that key's release.
+        if first > 0:
+            down = max(down, press_at[first - 1] + _EPSILON)
+        down = min(down, press_at[first] - _EPSILON / 2)
+        down = max(down, 0.0)
+
+        lag = _MODIFIER_LAG * math.exp(rng.gauss(0.0, _MODIFIER_LAG_SIGMA))
+        up = release_at[last] + lag
+        # The character is fixed once its key is down, so the modifier is free
+        # to lift from that instant -- but never before it.
+        up = max(up, press_at[last] + _EPSILON)
+        # And it must be gone before any key that does not want it.
+        if last + 1 < len(presses):
+            up = min(up, press_at[last + 1] - _EPSILON)
+        up = max(up, down + _EPSILON)
+
+        events.append((down, Action.DOWN, name, -1))
+        events.append((up, Action.UP, name, -1))
+    return events
+
+
+def plan(
+    text: str,
+    cadence: Cadence,
+    *,
+    seed: int | None = None,
+    modifiers_of: ModifiersOf | None = None,
+) -> list[Event]:
     """Compile ``text`` into the exact stream of key transitions to perform.
 
     The returned list is both what the engine types and what the ETA is
     measured from, so the estimate cannot drift away from reality. Passing a
     ``seed`` makes the schedule reproducible, which is what the tests rely on.
+
+    ``modifiers_of`` answers which modifiers a character needs -- a question
+    only the keyboard layout can settle, which is why it arrives as a function
+    rather than a table. Given one, Shift and AltGr become scheduled
+    keystrokes with a lead and a lag of their own. Without one they are left
+    to the backend, which presses them at the same instant as the key.
     """
     cadence.validate()
     rng = random.Random(seed)
@@ -481,7 +653,7 @@ def plan(text: str, cadence: Cadence, *, seed: int | None = None) -> list[Event]
     presses = _plan_presses(text, cadence, rng)
     if not presses:
         return []
-    presses = _calibrate(presses, text, cadence)
+    presses = _calibrate(presses, text, cadence, rng)
 
     press_at: list[float] = []
     clock = 0.0
@@ -494,6 +666,10 @@ def plan(text: str, cadence: Cadence, *, seed: int | None = None) -> list[Event]
     for i, press in enumerate(presses):
         timeline.append((press_at[i], Action.DOWN, press.value, press.index))
         timeline.append((release_at[i], Action.UP, press.value, -1))
+    if modifiers_of is not None:
+        timeline += _schedule_modifiers(
+            presses, press_at, release_at, modifiers_of, rng
+        )
     # UP is 0 and DOWN is 1, so a release scheduled for the same instant as a
     # press happens first — never a phantom double-press.
     timeline.sort(key=lambda item: (item[0], item[1]))

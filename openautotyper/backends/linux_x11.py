@@ -8,6 +8,14 @@ who knows their target is an X11 app can still ask for it by name.
 
 The keycode table is shared with the uinput backend: X11 keycodes are evdev
 scancodes plus 8, so one XKB layout serves both.
+
+This backend deliberately does not implement ``modifiers_for``, so Shift is
+pressed with the key it modifies rather than scheduled ahead of it as the
+uinput backend does. Not an oversight: XTEST announces itself a layer below
+anything keystroke timing could fix -- an X client watching through XRecord
+sees the injection itself -- so giving Shift a human lead here would buy
+nothing and would duplicate the trickiest state machine in the program into
+the one path that cannot be exercised from a Wayland session. Use uinput.
 """
 
 from __future__ import annotations

@@ -53,12 +53,10 @@ jobs:
           path: /home/builder/*.pkg.tar.zst
 
   executable:
-    name: Standalone · ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+    name: Standalone binary
+    # Built on the oldest distro still supported so the glibc it links against
+    # is old enough to run everywhere newer.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -66,8 +64,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: System dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: System dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -86,5 +83,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: OpenAutoTyper-${{ matrix.os }}
+          name: OpenAutoTyper-linux
           path: dist/

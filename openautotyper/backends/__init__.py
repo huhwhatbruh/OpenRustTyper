@@ -3,6 +3,18 @@
 Picks the most capable delivery method this machine actually supports, and
 says plainly why the others were passed over -- a diagnosis the user can act
 on beats a silent fallback that half works.
+
+Linux only, and deliberately. v2 also shipped a Windows backend on SendInput
+and a macOS one on CGEventPost; both are gone. Not because they did not work,
+but because on those platforms the operating system itself marks the events as
+synthetic and hands the flag to any application that asks. Windows sets
+``LLKHF_INJECTED`` on every low-level hook event, and ``KEYEVENTF_UNICODE``
+arrives as the virtual key ``VK_PACKET`` -- which a web page reads as
+``keyCode === 231`` with an empty ``code``, in three lines of JavaScript.
+
+There is no version of those backends that types as indistinguishably as a
+uinput device does, so shipping them meant making a claim on three platforms
+that was only ever true on one.
 """
 
 from __future__ import annotations
@@ -23,14 +35,6 @@ def registry() -> list[type[Backend]]:
         from .linux_x11 import X11Backend
 
         candidates += [UInputBackend, X11Backend]
-    elif sys.platform == "win32":
-        from .windows import WindowsBackend
-
-        candidates.append(WindowsBackend)
-    elif sys.platform == "darwin":
-        from .macos import QuartzBackend
-
-        candidates.append(QuartzBackend)
     candidates.append(NullBackend)
     return candidates
 

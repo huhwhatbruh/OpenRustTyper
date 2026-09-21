@@ -158,6 +158,13 @@ def doctor() -> int:
     layout = load_layout()
     print(f"\nkeyboard layout: {layout.source} — {len(layout)} characters reachable")
 
+    if sys.platform.startswith("linux"):
+        from .backends.identity import for_this_machine
+        identity = for_this_machine()
+        # Worth printing: this is the name the virtual keyboard appears under
+        # in /proc/bus/input/devices, which anything on the machine can read.
+        print(f"appears as:      {identity.name!r} — {identity.source}")
+
     from .panic import available as panic_available
     ok, reason = panic_available()
     print(f"abort key:       {'OK' if ok else 'UNAVAILABLE'} — {reason}")
@@ -265,6 +272,10 @@ def main(argv: list[str] | None = None) -> int:
         any_key_stops=args.any_key_stops or settings.any_key_stops,
         on_progress=line,
         seed=args.seed,
+        # A dry run is a preview. Pacing it would make it take exactly as long
+        # as the typing it is previewing, which is the one thing nobody wants
+        # from a preview.
+        realtime=not args.dry_run,
     )
 
     chars, words, lines = stats(text)
@@ -275,15 +286,30 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         if normalized.changed:
             print(f"  normalized: {normalized.summary()}", file=sys.stderr)
-        if not args.dry_run and panic_key:
-            print(f"  press {panic_key.removeprefix('KEY_')} on your keyboard to abort",
-                  file=sys.stderr)
+        if not args.dry_run and (panic_key or args.any_key_stops):
+            # Only promise the abort key if it can actually be delivered. It
+            # needs to read /dev/input/event*, which is a different permission
+            # from the /dev/uinput that typing needs -- so a machine that types
+            # perfectly may have no way to stop, and saying "press Esc" when
+            # Esc does nothing is worse than saying nothing at all.
+            from .panic import available as panic_available
+            ok, why = panic_available()
+            if ok:
+                label = "any key" if args.any_key_stops else panic_key.removeprefix("KEY_")
+                print(f"  press {label} on your keyboard to abort", file=sys.stderr)
+            else:
+                print(f"  WARNING: no abort key — {why}.\n"
+                      f"           Ctrl+C in this terminal still works.",
+                      file=sys.stderr)
 
     signal.signal(signal.SIGINT, lambda *_: session.stop("interrupted"))
     try:
         result = session.run()
     finally:
         line.clear()
+
+    if not args.quiet and not result.panic_active:
+        print("note: this ran with no abort key attached", file=sys.stderr)
 
     if args.dry_run:
         sys.stdout.write(backend.text)  # type: ignore[union-attr]

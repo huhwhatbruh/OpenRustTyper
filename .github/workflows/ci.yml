@@ -12,16 +12,14 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.os }} · py${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+    # Linux only, because the program is: typing through /dev/uinput is the
+    # whole of what it does.
+    name: py${{ matrix.python }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.11', '3.13']
-        include:
-          - os: ubuntu-latest
-            python: '3.12'
+        python: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
 
@@ -33,8 +31,7 @@ jobs:
       # Qt needs an X server and a handful of system libraries even to run
       # offscreen; without them the GUI tests skip silently and stop guarding
       # anything.
-      - name: System dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: System dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \

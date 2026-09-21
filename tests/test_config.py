@@ -53,3 +53,52 @@ def test_saving_creates_missing_directories(tmp_path: Path) -> None:
     path = tmp_path / "deep" / "nested" / "config.toml"
     assert Settings(wpm=42).save(path)
     assert Settings.load(path).wpm == 42
+
+
+def test_a_key_this_build_does_not_know_survives_a_save(tmp_path) -> None:
+    """The docstring promised this and the code did the opposite.
+
+    The GUI calls save() on every window close, so opening and closing it once
+    was enough to silently delete a setting written by a newer release or added
+    by hand.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'wpm = 90\nfuture_setting = "keep me"\nfuture_count = 7\n'
+        "future_flag = true\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path)
+    assert settings.wpm == 90.0
+    assert settings.unknown == {
+        "future_setting": "keep me", "future_count": 7, "future_flag": True,
+    }
+
+    assert settings.save(path)
+    reloaded = Settings.load(path)
+    assert reloaded.wpm == 90.0
+    assert reloaded.unknown == settings.unknown
+
+
+def test_preserved_keys_are_not_mistaken_for_settings(tmp_path) -> None:
+    """They round-trip, but they must not reach the cadence or the widgets."""
+    path = tmp_path / "config.toml"
+    path.write_text('wpm = 90\nwpm_typo = 999\n', encoding="utf-8")
+    settings = Settings.load(path)
+    assert settings.cadence().wpm == 90.0
+    assert "wpm_typo" not in {f.name for f in __import__("dataclasses").fields(Settings)}
+
+
+def test_a_config_with_no_surprises_writes_no_extra_section(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    Settings(wpm=85).save(path)
+    text = path.read_text(encoding="utf-8")
+    assert "does not understand" not in text
+    assert Settings.load(path).unknown == {}
+
+
+def test_a_string_with_quotes_survives_the_round_trip(tmp_path) -> None:
+    path = tmp_path / "config.toml"
+    Settings(backend='he said "uinput"').save(path)
+    assert Settings.load(path).backend == 'he said "uinput"'

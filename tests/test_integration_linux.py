@@ -8,6 +8,7 @@ actually works; everything else verifies a layer in isolation.
 from __future__ import annotations
 
 import sys
+import threading as _threading
 import time
 
 import pytest
@@ -152,3 +153,70 @@ def test_typing_the_abort_key_does_not_abort_the_run() -> None:
     result = session.run()
     assert result.state is State.DONE
     assert result.typed == result.total
+
+
+@needs_uinput
+def test_shift_leads_its_letter_the_way_a_hand_does() -> None:
+    """Measured on the wire, not in the model.
+
+    Before modifiers were scheduled, Shift went down 0.013-0.04 ms ahead of the
+    letter it modified -- the two events shared a millisecond, which is a thing
+    no keyboard has ever produced and three lines of JavaScript can see.
+    """
+    import statistics
+
+    from evdev import InputDevice, ecodes
+
+    backend = UInputBackend(settle=0.8)
+    backend.open()
+    try:
+        device = InputDevice(backend.device_path)
+        captured: list = []
+        stop = _threading.Event()
+
+        def drain() -> None:
+            while not stop.is_set():
+                try:
+                    captured.extend(device.read())
+                except BlockingIOError:
+                    time.sleep(0.002)
+
+        reader = _threading.Thread(target=drain, daemon=True)
+        reader.start()
+        time.sleep(0.2)
+
+        from openautotyper.timing import Action, plan
+
+        text = "Hello World. A Quick Brown Fox! Stop."
+        for event in plan(text, Cadence(wpm=70), seed=7,
+                          modifiers_of=backend.modifiers_for):
+            if event.delay > 0:
+                time.sleep(event.delay)
+            if event.action is Action.DOWN:
+                backend.key_down(event.value)
+            else:
+                backend.key_up(event.value)
+        time.sleep(0.4)
+        stop.set()
+        reader.join(timeout=2.0)
+    finally:
+        backend.release_all()
+        backend.close()
+
+    shift = 42
+    leads: list[float] = []
+    pending: float | None = None
+    for event in captured:
+        if event.type != ecodes.EV_KEY or event.value != 1:
+            continue
+        if event.code == shift:
+            pending = event.timestamp()
+        elif pending is not None:
+            leads.append(event.timestamp() - pending)
+            pending = None
+
+    assert leads, "no shifted key was typed"
+    # The human range is roughly 50-150 ms. The point of the assertion is the
+    # floor: anything under a millisecond is the machine showing through.
+    assert min(leads) > 0.015, leads
+    assert 0.03 < statistics.mean(leads) < 0.20, statistics.mean(leads)

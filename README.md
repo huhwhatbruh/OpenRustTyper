@@ -1,7 +1,7 @@
 # OpenAutoTyper 2.0
 
 Types text into whatever window has focus, as real keystrokes, at a cadence you
-control.
+control. Linux only, and deliberately.
 
 That is the entire job. There is no browser automation, no network access, no
 model in the loop, and no telemetry. It reads text, it presses keys.
@@ -34,18 +34,32 @@ other keyboard's — on Wayland, on X11, and in a plain TTY.
 Run `openautotyper --doctor` and it will tell you exactly what your machine can
 do and what to fix if something is missing.
 
+### And why it is Linux only
+
+v2 shipped a Windows backend on `SendInput` and a macOS one on `CGEventPost`.
+Both worked. Both are gone, because on those platforms the operating system
+marks the events as synthetic and hands the flag to any application that asks:
+Windows sets `LLKHF_INJECTED` on every low-level hook event, and
+`KEYEVENTF_UNICODE` arrives as the virtual key `VK_PACKET`, which a web page
+reads as `keyCode === 231` with an empty `code`. Three lines of JavaScript.
+
+There is no version of those backends that types as indistinguishably as a
+uinput device does, so keeping them meant making a claim on three platforms
+that was only ever true on one.
+
 ### Also fixed along the way
 
 | v1 | v2 |
 |---|---|
-| ETA was `characters × interval`, ignoring every pause — routinely 40% out | The WPM dial is calibrated: the estimate is exact by construction |
+| ETA was `characters × interval`, ignoring every pause — routinely 40% out | The estimate is the sum of the schedule that gets typed, pauses and corrections included |
 | `time.sleep()` in a loop, accumulating scheduler drift | Deadline-based pacing; measured within 0.5% over a full run |
 | Stop meant `Process.terminate()`, which could leave Shift or Ctrl **physically held** | Cooperative stop, with an unconditional modifier release on every exit path |
 | Abort was "fling the mouse into a screen corner", via the same X11 path that may be dead | A real abort key read from `/dev/input`, working regardless of focus |
 | Gaussian delays, clamped — piling up at the clamp in a way no hand produces | Lognormal intervals, which is the distribution real keystrokes follow |
+| The virtual keyboard was named after the program, in a world-readable file | It is modelled on a keyboard the machine already has, down to the capability bitmap |
 | One character at a time through the clipboard for anything non-ASCII, destroying what you had copied | Typographic characters fold to ASCII; the clipboard is a last resort, and it is restored |
 | Hardcoded US QWERTY assumptions | The active XKB layout is compiled and queried, so non-US layouts type correctly |
-| 830 lines in one file, no tests | A package with 133 tests |
+| 830 lines in one file, no tests | A package with 178 tests |
 
 ---
 
@@ -60,8 +74,8 @@ pip install openautotyper[gui]     # ...and the graphical interface
 
 ### Arch Linux
 
-A `PKGBUILD` is in `packaging/`. It installs the udev rule and the desktop
-entry for you, so the only step left is the `input` group:
+A `PKGBUILD` is in `packaging/`. It installs the udev rule, the icon and the
+desktop entry for you, so the only step left is the `input` group:
 
 ```bash
 cd packaging && makepkg -si
@@ -81,10 +95,6 @@ sudo usermod -aG input "$USER"
 ```
 
 Log out and back in, then check with `openautotyper --doctor`.
-
-No setup is needed on Windows or macOS — except that macOS requires
-Accessibility permission for the terminal or app you launch from
-(System Settings → Privacy & Security → Accessibility).
 
 ---
 
@@ -127,7 +137,7 @@ you use, every modifier is released before the program lets go of the keyboard.
 
 ## The cadence model
 
-Four things are true of people at keyboards, and the model implements each:
+Things that are true of people at keyboards, each of which the model implements:
 
 - **Intervals are lognormal.** The distribution has a hard floor, a dense body
   and a long right tail. Sampling a Gaussian and clamping it — v1's approach —
@@ -140,11 +150,70 @@ Four things are true of people at keyboards, and the model implements each:
   twitch instead.
 - **Pauses cluster at syntax.** After sentences, around paragraphs — not spread
   evenly across words.
+- **Hold time is half of keystroke timing.** Every keydown a page receives is
+  paired with a keyup, and how long the key was held is as characteristic as
+  the gap between keys — more so, because it barely varies with what is being
+  typed. The mean falls as speed rises, the way real hands do.
+- **Shift is a keystroke.** A capital is two presses, and the first is the one
+  that gives a typer away: pressed with the letter it modifies, Shift and the
+  letter arrive in the same millisecond, which no hand does. Here it leads by
+  50–150 ms and lingers past the letter's own release — measured on the wire,
+  a mean lead of 71 ms and a mean lag of 48 ms.
+- **Typing warms up and tires.** A mean-reverting walk wanders but never *goes*
+  anywhere; over three thousand characters the first and last thirds used to
+  come out 173.1 ms and 175.7 ms apart, which is to say identical. The pace now
+  starts below its settled rate, finds it over a paragraph or two, and gives
+  some of it back by the end.
 
-**The WPM dial is honest.** Every setting above shapes the rhythm; none of them
-moves the average. The finished schedule is scaled to the rate you asked for, so
-70 wpm means 70 wpm end to end, pauses and corrections included — and the ETA is
-therefore closed-form arithmetic rather than a guess. There is a test for it.
+**The WPM dial is honest, to within a few percent.** Every setting above shapes
+the rhythm and none of them moves the average, so 70 wpm means 70 wpm end to
+end, pauses and corrections included. It is not exact, on purpose: normalising
+each schedule to the requested rate made total duration a function of length and
+dial alone — identical to the microsecond on every run of one document, which is
+a fingerprint across runs even though the rhythm inside differed every time. So
+each run draws its own pace for the day. Over sixty runs the mean comes back to
+70.0 wpm with a spread of 2.4. `--flat` still gives an exact metronome.
+
+The ETA is the sum of the schedule that will actually be typed, so it moves with
+the run rather than reporting the nominal rate and being wrong.
+
+---
+
+## What this does and does not hide
+
+Typing through `/dev/uinput` means the kernel presents the device as a real
+keyboard, so the compositor routes it like one. That is worth nothing if the
+device then announces itself, and `/proc/bus/input/devices` is world-readable.
+The defaults `python-evdev` hands out said:
+
+```
+N: Name="OpenAutoTyper Virtual Keyboard"
+P: Phys=py-evdev-uinput
+B: EV=200003
+```
+
+against a keyboard that is actually plugged in:
+
+```
+N: Name="HID 0d62:3740 Keyboard"
+P: Phys=usb-0000:00:14.0-10/input1
+B: EV=12001f
+B: MSC=10
+B: LED=7
+```
+
+Four separate giveaways, and the name is only the loudest — `Phys` still said
+py-evdev after any rename, and the capability bitmap described a keyboard with
+force feedback, no Caps Lock light, no autorepeat and no scancodes: a device
+that has never existed. So the identity is now modelled on a keyboard the
+machine genuinely has, the capabilities are a keyboard's, and every key event
+is preceded by the `MSC_SCAN` that real hardware sends.
+
+**What it does not hide.** The kernel puts every uinput device under
+`/sys/devices/virtual/input/`, and nothing a userspace process passes to
+`UI_DEV_SETUP` changes that. Anything willing to follow the sysfs path knows
+this device is virtual. The aim is to stop announcing it, not to defeat an
+inspection, and no amount of work on this program will change that.
 
 ---
 
@@ -161,16 +230,15 @@ openautotyper/
   cli.py           the command line
   backends/
     xkb.py         compiles the active keyboard layout into a keystroke table
+    identity.py      what the virtual keyboard looks like to anything inspecting it
     linux_uinput.py  virtual keyboard — Wayland, X11, TTY
     linux_x11.py     XTEST — X11 only, and it says so
-    windows.py       SendInput with Unicode events
-    macos.py         Quartz CGEvent
     null.py          types into a string, for --dry-run and the tests
   gui/             PySide6 interface
 ```
 
-The engine, the CLI and every backend outside Linux run on the standard library
-alone. Linux needs `evdev`; the GUI needs `PySide6`. Nothing else.
+The engine, the cadence model and the CLI run on the standard library alone.
+`evdev` is what opens `/dev/uinput`; the GUI needs `PySide6`. Nothing else.
 
 ```bash
 pip install -e ".[gui,dev]"

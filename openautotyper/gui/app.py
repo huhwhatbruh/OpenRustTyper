@@ -671,7 +671,16 @@ class MainWindow(QMainWindow):
     def _refresh_footer(self) -> None:
         if self._loading:
             return
-        if self.any_key_check.isChecked():
+        # Only promise the abort key if it can be delivered. Reading
+        # /dev/input/event* is a different permission from writing
+        # /dev/uinput, so this window can be perfectly able to type and have
+        # no way to stop -- and "Press Esc to stop" when Esc does nothing is
+        # worse than saying nothing at all.
+        from ..panic import available as panic_available
+        ok, why = panic_available()
+        if not ok:
+            hint = f"No abort key — {why}. Use the Stop button."
+        elif self.any_key_check.isChecked():
             hint = "Typing stops the moment you touch the keyboard."
         else:
             label = self.panic_combo.currentText()

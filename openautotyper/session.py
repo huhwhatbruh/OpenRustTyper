@@ -64,6 +64,10 @@ class Result:
     skipped: list[tuple[int, str]] = field(default_factory=list)
     #: Seconds the schedule fell behind because the machine was busy.
     slip: float = 0.0
+    #: Whether the abort key was actually watching during this run. False means
+    #: one was asked for and could not be attached -- the run went ahead with
+    #: no kill switch, which the caller has to be able to say out loud.
+    panic_active: bool = True
 
     @property
     def completed(self) -> bool:
@@ -85,6 +89,7 @@ class TypeSession:
         on_progress: Callable[[Progress], None] | None = None,
         progress_hz: float = 15.0,
         seed: int | None = None,
+        realtime: bool = True,
     ) -> None:
         self.text = text
         self.backend = backend
@@ -93,8 +98,20 @@ class TypeSession:
         self.any_key_stops = any_key_stops
         self._on_progress = on_progress
         self._min_gap = 1.0 / progress_hz if progress_hz > 0 else 0.0
+        #: Whether to wait out the schedule or walk it as fast as it will go.
+        #: A dry run wants the second: it is a preview, and a preview that takes
+        #: as long as the typing would is not one.
+        self._realtime = realtime
+        #: Set by :meth:`run` once the abort key has been attached, or not.
+        self.panic_active = True
 
-        self.events: list[Event] = plan(text, cadence, seed=seed)
+        # The backend is the only thing that knows which modifiers a character
+        # needs on this keyboard layout, so the schedule asks it. That is what
+        # lets Shift be a keystroke with a lead of its own rather than an event
+        # the device fires in the same instant as the letter.
+        self.events: list[Event] = plan(
+            text, cadence, seed=seed, modifiers_of=backend.modifiers_for
+        )
         self.total = len(text)
         #: Seconds of work left after each event, precomputed so the ETA is a
         #: lookup rather than a guess.
@@ -181,7 +198,23 @@ class TypeSession:
                     exclude_paths=(exclude,) if exclude else (),
                     any_key=self.any_key_stops,
                 )
-                watcher.start()
+                # Dropping this bool on the floor was the worst bug in here.
+                # The watcher needs to read /dev/input/event*, which is a
+                # different permission from the /dev/uinput the typing needs:
+                # a machine can be perfectly able to type and unable to stop.
+                # The caller promised the user an abort key before this point,
+                # so a failure has to be said out loud, not inferred later from
+                # the fact that Escape did nothing.
+                self.panic_active = watcher.start()
+                if not self.panic_active:
+                    watcher = None
+                    self._publish(Progress(
+                        State.COUNTDOWN, 0, self.total, 0.0, self.estimated,
+                        "WARNING: the abort key could not be attached — no "
+                        "keyboard in /dev/input is readable (add yourself to "
+                        "group 'input'). Typing will not be stoppable from "
+                        "the keyboard.",
+                    ))
 
             if not self._run_countdown(pacer):
                 return self._finish(State.STOPPED, pacer.elapsed, self._stop_reason,
@@ -192,7 +225,13 @@ class TypeSession:
             events = self.events
 
             for i, event in enumerate(events):
-                if not pacer.wait(event.delay):
+                if self._realtime:
+                    if not pacer.wait(event.delay):
+                        return self._finish(State.STOPPED, pacer.elapsed,
+                                            self._stop_reason, skipped, pacer.slip)
+                elif self._stop.is_set():
+                    # Not paced, but still abortable: a preview of a long
+                    # document is fast, not instantaneous.
                     return self._finish(State.STOPPED, pacer.elapsed,
                                         self._stop_reason, skipped, pacer.slip)
                 try:
@@ -282,6 +321,7 @@ class TypeSession:
         result = Result(
             state=state, typed=self._typed, total=self.total,
             duration=elapsed, reason=reason, skipped=skipped, slip=slip,
+            panic_active=self.panic_active,
         )
         self._result = result
         self._publish(

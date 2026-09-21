@@ -8,13 +8,17 @@ arch=('any')
 url='https://github.com/huhwhatbruh/OpenAutoTyper'
 license=('MIT')
 # evdev is what opens /dev/uinput; without it there is no Linux backend at all.
-depends=('python' 'python-evdev')
+# pyside6 is a hard dependency because this package installs a desktop entry:
+# a launcher in the application menu has to start something. Leaving Qt
+# optional made clicking OpenAutoTyper in the menu do nothing at all -- the
+# ImportError goes to a terminal that Terminal=false never opens. Anyone who
+# only wants the command line can install the wheel instead of this package.
+depends=('python' 'python-evdev' 'pyside6')
 makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel')
 checkdepends=('python-pytest')
 # The clipboard is only a fallback for characters no keystroke can reach, and
 # it is tried in this order: wl-copy, xclip, xsel, then pyperclip.
-optdepends=('pyside6: graphical interface (openautotyper-gui)'
-            'wl-clipboard: clipboard fallback on Wayland'
+optdepends=('wl-clipboard: clipboard fallback on Wayland'
             'xclip: clipboard fallback on X11'
             'xsel: clipboard fallback on X11, alternative to xclip'
             'python-pyperclip: clipboard fallback of last resort')
@@ -49,6 +53,8 @@ package() {
     "$pkgdir/usr/lib/udev/rules.d/99-openautotyper-uinput.rules"
   install -Dm644 packaging/openautotyper.desktop \
     "$pkgdir/usr/share/applications/openautotyper.desktop"
+  install -Dm644 packaging/openautotyper.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/openautotyper.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

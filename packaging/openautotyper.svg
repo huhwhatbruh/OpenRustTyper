@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <rect x="3" y="12" width="42" height="26" rx="4" fill="#2b3340"/>
+  <rect x="3.75" y="12.75" width="40.5" height="24.5" rx="3.25" fill="none" stroke="#4a5768" stroke-width="1.5"/>
+  <g fill="#c8d2e0">
+    <rect x="7" y="16" width="5" height="5" rx="1.2"/>
+    <rect x="14" y="16" width="5" height="5" rx="1.2"/>
+    <rect x="21" y="16" width="5" height="5" rx="1.2"/>
+    <rect x="28" y="16" width="5" height="5" rx="1.2"/>
+    <rect x="35" y="16" width="6" height="5" rx="1.2"/>
+    <rect x="7" y="23" width="5" height="5" rx="1.2"/>
+    <rect x="14" y="23" width="5" height="5" rx="1.2"/>
+    <rect x="28" y="23" width="5" height="5" rx="1.2"/>
+    <rect x="35" y="23" width="6" height="5" rx="1.2"/>
+    <rect x="7" y="30" width="7" height="4" rx="1.2"/>
+    <rect x="34" y="30" width="7" height="4" rx="1.2"/>
+  </g>
+  <!-- the key being struck, and the caret it produces -->
+  <rect x="21" y="23" width="5" height="5" rx="1.2" fill="#4ea1ff"/>
+  <rect x="16" y="30" width="16" height="4" rx="1.2" fill="#4ea1ff" opacity="0.55"/>
+</svg>
