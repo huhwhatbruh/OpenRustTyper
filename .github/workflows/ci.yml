@@ -10,60 +10,50 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     # Linux only, because the program is: typing through /dev/uinput is the
     # whole of what it does.
-    name: py${{ matrix.python }}
+    name: rust
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: ${{ matrix.python }}
-          cache: pip
+          components: rustfmt, clippy
 
-      # Qt needs an X server and a handful of system libraries even to run
-      # offscreen; without them the GUI tests skip silently and stop guarding
-      # anything.
+      - uses: Swatinem/rust-cache@v2
+
+      # The window opens these when it starts rather than linking them, and the
+      # keymap tests compile the real layout through libxkbcommon; without it
+      # they would quietly test the built-in fallback instead.
       - name: System dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon0 libxkbcommon-x11-0 libegl1 libgl1 \
-            libdbus-1-3 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
-            libxcb-shape0 libxcb-xinerama0 xvfb
+            libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libx11-6 \
+            libegl1 libgl1 desktop-file-utils
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[gui,dev]"
+      - name: Format
+        run: cargo fmt --check
 
       - name: Lint
-        run: ruff check openautotyper tests
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        run: cargo test --locked
 
-      # The engine must not quietly start depending on Qt or evdev: the CLI is
-      # supposed to run on a bare machine.
-      - name: Import engine without optional extras
-        run: |
-          python -c "
-          import openautotyper.timing, openautotyper.text, openautotyper.clock
-          import openautotyper.cli
-          print('engine imports with stdlib only')
-          "
+      # The engine must not quietly start depending on the window: the command
+      # line is supposed to build and run without any of it.
+      - name: Command line builds without the window
+        run: cargo build --locked --no-default-features
 
       - name: CLI smoke test
         run: |
-          python -m openautotyper --list-backends
-          python -m openautotyper --doctor || true
-          echo "round trip" | python -m openautotyper --dry-run -q
+          cargo run --locked --no-default-features -q -- --list-backends
+          cargo run --locked --no-default-features -q -- --doctor || true
+          echo "round trip" | cargo run --locked --no-default-features -q -- --dry-run -q

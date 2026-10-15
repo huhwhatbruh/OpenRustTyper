@@ -4,24 +4,24 @@ pkgname=openautotyper
 pkgver=2.0.0
 pkgrel=1
 pkgdesc='Type text into the focused window as real keystrokes, at a cadence you control'
-arch=('any')
+arch=('x86_64' 'aarch64')
 url='https://github.com/huhwhatbruh/OpenAutoTyper'
 license=('MIT')
-# evdev is what opens /dev/uinput; without it there is no Linux backend at all.
-# pyside6 is a hard dependency because this package installs a desktop entry:
-# a launcher in the application menu has to start something. Leaving Qt
-# optional made clicking OpenAutoTyper in the menu do nothing at all -- the
-# ImportError goes to a terminal that Terminal=false never opens. Anyone who
-# only wants the command line can install the wheel instead of this package.
-depends=('python' 'python-evdev' 'pyside6')
-makedepends=('python-build' 'python-installer' 'python-hatchling' 'python-wheel')
-checkdepends=('python-pytest')
-# The clipboard is only a fallback for characters no keystroke can reach, and
-# it is tried in this order: wl-copy, xclip, xsel, then pyperclip.
+# The window is egui, which opens its own libraries when it starts rather than
+# linking them: wayland and libx11 for the display, libxkbcommon for the
+# keyboard, libglvnd for OpenGL. They are real dependencies all the same -- a
+# desktop entry that starts a program missing one of them is a button that does
+# nothing, so they are depends and not optdepends. The command line needs none
+# of them beyond libxkbcommon, which it falls back from if it is absent.
+depends=('gcc-libs' 'glibc' 'libglvnd' 'libx11' 'libxkbcommon' 'wayland')
+makedepends=('cargo')
+# The clipboard is only a fallback for characters no keystroke can reach, and it
+# is tried in this order: wl-copy, xclip, xsel.
 optdepends=('wl-clipboard: clipboard fallback on Wayland'
             'xclip: clipboard fallback on X11'
             'xsel: clipboard fallback on X11, alternative to xclip'
-            'python-pyperclip: clipboard fallback of last resort')
+            'libxtst: the XTEST backend, for X11 sessions without /dev/uinput access'
+            'xdg-desktop-portal: the "Open file" dialog in the window')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Pinned at release time: the release workflow runs `updpkgsums` against the
@@ -30,22 +30,35 @@ sha256sums=('SKIP')
 
 _srcdir="OpenAutoTyper-$pkgver"
 
+prepare() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
 build() {
   cd "$_srcdir"
-  python -m build --wheel --no-isolation
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
 }
 
 check() {
   cd "$_srcdir"
-  # The uinput suite needs a writable /dev/uinput and the Qt suite needs
-  # PySide6; both skip themselves when absent, which is the normal state of a
-  # clean build chroot. What is left still covers the engine end to end.
-  python -m pytest -q
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The device tests need a writable /dev/uinput and read access to
+  # /dev/input; both skip themselves in a clean build chroot, which is the
+  # normal state of one. What is left still covers the engine end to end.
+  cargo test --frozen
 }
 
 package() {
   cd "$_srcdir"
-  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm755 target/release/openautotyper \
+    "$pkgdir/usr/bin/openautotyper"
+  install -Dm755 target/release/openautotyper-gui \
+    "$pkgdir/usr/bin/openautotyper-gui"
 
   # A rule shipped by a package belongs in /usr/lib; /etc/udev/rules.d is
   # reserved for the administrator's own overrides.

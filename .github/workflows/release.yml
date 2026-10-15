@@ -5,22 +5,10 @@ on:
     types: [created]
   workflow_dispatch:
 
-jobs:
-  wheel:
-    name: Build wheel and sdist
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip install --upgrade pip build
-      - run: python -m build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
+env:
+  CARGO_TERM_COLOR: always
 
+jobs:
   archpkg:
     name: Arch package
     runs-on: ubuntu-latest
@@ -31,8 +19,8 @@ jobs:
       - name: Build dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            python-build python-installer python-hatchling python-wheel \
-            python-pytest python-evdev namcap sudo pacman-contrib
+            rust namcap sudo pacman-contrib \
+            libglvnd libx11 libxkbcommon wayland
 
       # makepkg refuses to run as root, so give it an unprivileged user.
       - name: Build
@@ -52,36 +40,29 @@ jobs:
           name: OpenAutoTyper-arch
           path: /home/builder/*.pkg.tar.zst
 
-  executable:
-    name: Standalone binary
+  binaries:
+    name: Linux binaries
     # Built on the oldest distro still supported so the glibc it links against
     # is old enough to run everywhere newer.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: System dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon0 libegl1 libgl1 libdbus-1-3
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[gui]" pyinstaller
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: >
-          pyinstaller --onefile --console --name openautotyper
-          --collect-submodules openautotyper
-          openautotyper/__main__.py
+        run: cargo build --locked --release
+
+      - name: Package
+        run: |
+          mkdir -p dist/openautotyper
+          cp target/release/openautotyper target/release/openautotyper-gui dist/openautotyper/
+          cp -r packaging LICENSE README.md dist/openautotyper/
+          tar -C dist -czf dist/openautotyper-linux-x86_64.tar.gz openautotyper
 
       - uses: actions/upload-artifact@v4
         with:
           name: OpenAutoTyper-linux
-          path: dist/
+          path: dist/openautotyper-linux-x86_64.tar.gz
