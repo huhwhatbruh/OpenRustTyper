@@ -3,6 +3,7 @@ name = "openautotyper"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.92"
+default-run = "openautotyper"
 description = "Type text into the focused window as real keystrokes, at a cadence you control."
 license = "MIT"
 authors = ["huhwhatbruh"]
