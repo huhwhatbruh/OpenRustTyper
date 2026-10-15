@@ -23,7 +23,8 @@ sed -e 's|^source=.*|source=("$pkgname-$pkgver.tar.gz")|' \
     "$root/packaging/PKGBUILD" > "$work/PKGBUILD"
 cp "$root/packaging/openautotyper.install" "$work/"
 
-(cd "$work" && PKGDEST="$out" makepkg --force --noconfirm)
+# MAKEPKG_FLAGS=--nodeps lets a rustup toolchain stand in for the cargo package.
+(cd "$work" && PKGDEST="$out" makepkg --force --noconfirm ${MAKEPKG_FLAGS:-})
 echo
 echo "built:"
 ls -1 "$out"/openautotyper-*.pkg.tar.* 2>/dev/null
