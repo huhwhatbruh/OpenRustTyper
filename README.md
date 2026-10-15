@@ -59,23 +59,35 @@ that was only ever true on one.
 | The virtual keyboard was named after the program, in a world-readable file | It is modelled on a keyboard the machine already has, down to the capability bitmap |
 | One character at a time through the clipboard for anything non-ASCII, destroying what you had copied | Typographic characters fold to ASCII; the clipboard is a last resort, and it is restored |
 | Hardcoded US QWERTY assumptions | The active XKB layout is compiled and queried, so non-US layouts type correctly |
-| 830 lines in one file, no tests | A package with 178 tests |
+| 830 lines in one file, no tests | A Rust crate with over 200 tests, including the statistical ones that check the cadence model |
 
 ---
 
 ## Install
 
-Requires Python 3.11 or newer.
+OpenAutoTyper is a Rust program: a command-line tool, `openautotyper`, and an
+[egui](https://github.com/emilk/egui) window, `openautotyper-gui`, from one
+crate. Rust 1.92 or newer builds it.
 
 ```bash
-pip install openautotyper          # engine + CLI
-pip install openautotyper[gui]     # ...and the graphical interface
+cargo install --path .                      # both programs
+cargo install --path . --no-default-features  # command line only, no window
 ```
+
+The window needs no toolkit installed on your machine: egui draws it, on
+Wayland or X11, using the OpenGL your desktop already has. The only runtime
+libraries are the ones every desktop provides (`libxkbcommon`, `libwayland`,
+`libX11`), and they are loaded when the program starts rather than linked, so a
+machine missing one gets an explanation instead of a crash.
+
+The window's **Open file…** button uses your desktop's file-chooser portal
+(`xdg-desktop-portal`); everything else works without it.
 
 ### Arch Linux
 
-A `PKGBUILD` is in `packaging/`. It installs the udev rule, the icon and the
-desktop entry for you, so the only step left is the `input` group:
+A `PKGBUILD` is in `packaging/`. It builds the crate, and installs both programs,
+the udev rule, the icon and the desktop entry for you, so the only step left is
+the `input` group:
 
 ```bash
 cd packaging && makepkg -si
@@ -220,30 +232,43 @@ inspection, and no amount of work on this program will change that.
 ## Architecture
 
 ```
-openautotyper/
-  text.py          normalization: line endings, typography, zero-width characters
-  timing.py        the cadence model — pure functions, no I/O
-  clock.py         drift-corrected, interruptible pacing
-  session.py       countdown, keystrokes, progress, guaranteed cleanup
-  panic.py         the abort key, read straight from /dev/input
-  config.py        settings, as TOML you can edit by hand
-  cli.py           the command line
-  backends/
-    xkb.py         compiles the active keyboard layout into a keystroke table
-    identity.py      what the virtual keyboard looks like to anything inspecting it
-    linux_uinput.py  virtual keyboard — Wayland, X11, TTY
-    linux_x11.py     XTEST — X11 only, and it says so
-    null.py          types into a string, for --dry-run and the tests
-  gui/             PySide6 interface
+src/
+  text.rs          normalization: line endings, typography, zero-width characters
+  timing.rs        the cadence model — pure functions, no I/O
+  clock.rs         drift-corrected, interruptible pacing
+  session.rs       countdown, keystrokes, progress, guaranteed cleanup
+  panic.rs         the abort key, read straight from /dev/input
+  config.rs        settings, as TOML you can edit by hand
+  clipboard.rs     the last-resort paste, and putting back what it replaced
+  main.rs          the command line
+  gui.rs           the egui window
+  bin/gui.rs       the launcher the desktop entry starts
+  backend/
+    xkb.rs         compiles the active keyboard layout into a keystroke table
+    identity.rs    what the virtual keyboard looks like to anything inspecting it
+    uinput.rs      virtual keyboard — Wayland, X11, TTY
+    x11.rs         XTEST — X11 only, and it says so
+    null.rs        types into a string, for --dry-run and the tests
+    codes.rs       evdev key codes and the HID scancodes that go with them
+tests/
+  cli.rs           the command line, as subprocesses
+  device.rs        real /dev/uinput devices; skips itself without the permission
+  packaging.rs     the desktop entry and the Arch package agree with each other
 ```
 
-The engine, the cadence model and the CLI run on the standard library alone.
-`evdev` is what opens `/dev/uinput`; the GUI needs `PySide6`. Nothing else.
+The engine, the cadence model and the command line know nothing about egui:
+build with `--no-default-features` and the window, and everything it pulls in,
+is gone. `libxkbcommon` and the X libraries are opened at run time rather than
+linked, so a minimal machine still gets the built-in US layout.
 
 ```bash
-pip install -e ".[gui,dev]"
-pytest
+cargo test
+cargo clippy --all-targets
 ```
+
+The device tests that read keystrokes back off `/dev/input` need the `input`
+group *and* grab the virtual keyboard first, so a test can never type into
+whatever window you have open. Without the permission they skip, and say so.
 
 ---
 

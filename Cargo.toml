@@ -1,0 +1,53 @@
+[package]
+name = "openautotyper"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.92"
+description = "Type text into the focused window as real keystrokes, at a cadence you control."
+license = "MIT"
+authors = ["huhwhatbruh"]
+repository = "https://github.com/huhwhatbruh/OpenAutoTyper"
+keywords = ["keyboard", "automation", "typing", "accessibility", "uinput"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "openautotyper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openautotyper"
+path = "src/main.rs"
+
+[[bin]]
+name = "openautotyper-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:rfd"]
+
+[dependencies]
+libc = "0.2"
+libloading = "0.8"
+rand = "0.8"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.35", optional = true, default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+rfd = { version = "0.15", optional = true, default-features = false, features = [
+    "xdg-portal",
+    "tokio",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
