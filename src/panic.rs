@@ -220,7 +220,7 @@ fn run(
                 }
                 continue;
             }
-            for chunk in buf[..n as usize].chunks_exact(EVENT) {
+            for chunk in buf[..n as usize].as_chunks::<EVENT>().0 {
                 // SAFETY: `chunk` is exactly one `input_event`; read unaligned.
                 let ev: libc::input_event =
                     unsafe { std::ptr::read_unaligned(chunk.as_ptr().cast()) };

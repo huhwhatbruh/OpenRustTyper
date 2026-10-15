@@ -78,8 +78,8 @@ impl Mirror {
         let (sink, flag) = (seen.clone(), stop.clone());
         let origin = Instant::now();
         let thread = std::thread::spawn(move || {
-            let size = std::mem::size_of::<Raw>();
-            let mut buf = vec![0u8; size * 64];
+            const SIZE: usize = std::mem::size_of::<Raw>();
+            let mut buf = vec![0u8; SIZE * 64];
             while !flag.load(Ordering::SeqCst) {
                 // SAFETY: reading into a buffer we own, at most its length.
                 let n = unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -88,7 +88,7 @@ impl Mirror {
                     continue;
                 }
                 let at = origin.elapsed().as_secs_f64();
-                for chunk in buf[..n as usize].chunks_exact(size) {
+                for chunk in buf[..n as usize].as_chunks::<SIZE>().0 {
                     // SAFETY: each chunk is exactly one input_event.
                     let ev: Raw = unsafe { std::ptr::read_unaligned(chunk.as_ptr().cast()) };
                     sink.lock().unwrap().push(Seen {
