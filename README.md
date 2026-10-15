@@ -1,4 +1,4 @@
-# OpenAutoTyper 2.0
+# OpenAutoTyper 1.0
 
 Types text into whatever window has focus, as real keystrokes, at a cadence you
 control. Linux only, and deliberately.
@@ -9,68 +9,71 @@ model in the loop, and no telemetry. It reads text, it presses keys.
 ```bash
 openautotyper -f essay.txt --wpm 80      # from a file
 pbpaste | openautotyper --delay 3        # from a pipe
-openautotyper --gui                      # or with a window
+openautotyper-gui                        # or with a window
 ```
+
+OpenAutoTyper 1.0 is written in Rust: a command-line tool and an
+[egui](https://github.com/emilk/egui) window from one crate, with no
+interpreter and no GUI toolkit to install. It carries on from the Python
+releases that came before it — same settings file, same behaviour, same
+cadence model — and their history is in git.
 
 ---
 
-## Why 2.0 is a rewrite rather than a patch
+## How it types
 
-v1.0 was built on `pyautogui`, which types through **XTEST** — an X11 protocol
-extension. On a Wayland session XTEST still appears to work, because XWayland is
+It types through a **virtual keyboard on `/dev/uinput`**. The kernel presents it
+as a real keyboard, so the compositor routes its events like any other
+keyboard's — on Wayland, on X11, and in a plain TTY.
+
+That matters because the usual alternative, **XTEST**, is an X11 protocol
+extension. On a Wayland session it still appears to work, because XWayland is
 running, but the keystrokes only reach XWayland clients. Aim them at a native
 Wayland window — KDE's own apps, Firefox or Chromium in Wayland mode, anything
-Electron since 2023 — and they land nowhere at all.
-
-That one fact accounts for most of what got reported as "laggy", "drops
-characters" and "sometimes just does nothing". Wayland is the default session on
-Fedora, Ubuntu, and every current KDE and GNOME spin, so for a growing share of
-users v1 could not have worked.
-
-v2 types through a **virtual keyboard on `/dev/uinput`** instead. The kernel
-presents it as a real keyboard, so the compositor routes its events like any
-other keyboard's — on Wayland, on X11, and in a plain TTY.
+Electron since 2023 — and they land nowhere at all. That one fact accounts for
+most of what gets reported as "laggy", "drops characters" and "sometimes just
+does nothing". XTEST is still here as a fallback for X11 sessions where
+`/dev/uinput` is not writable, and it refuses to run under Wayland at all,
+where it would only look as though it worked.
 
 Run `openautotyper --doctor` and it will tell you exactly what your machine can
 do and what to fix if something is missing.
 
-### And why it is Linux only
+### Why it is Linux only
 
-v2 shipped a Windows backend on `SendInput` and a macOS one on `CGEventPost`.
-Both worked. Both are gone, because on those platforms the operating system
-marks the events as synthetic and hands the flag to any application that asks:
-Windows sets `LLKHF_INJECTED` on every low-level hook event, and
-`KEYEVENTF_UNICODE` arrives as the virtual key `VK_PACKET`, which a web page
-reads as `keyCode === 231` with an empty `code`. Three lines of JavaScript.
+Windows sends `SendInput` events with `LLKHF_INJECTED` set on every low-level
+hook event, and `KEYEVENTF_UNICODE` arrives as the virtual key `VK_PACKET`,
+which a web page reads as `keyCode === 231` with an empty `code`. macOS and
+Windows both mark injected events as synthetic and hand the flag to any
+application that asks. There is no backend on those platforms that types as
+indistinguishably as a uinput device does, so rather than make a claim on three
+platforms that is only true on one, there is only the one.
 
-There is no version of those backends that types as indistinguishably as a
-uinput device does, so keeping them meant making a claim on three platforms
-that was only ever true on one.
+### What you get
 
-### Also fixed along the way
-
-| v1 | v2 |
-|---|---|
-| ETA was `characters × interval`, ignoring every pause — routinely 40% out | The estimate is the sum of the schedule that gets typed, pauses and corrections included |
-| `time.sleep()` in a loop, accumulating scheduler drift | Deadline-based pacing; measured within 0.5% over a full run |
-| Stop meant `Process.terminate()`, which could leave Shift or Ctrl **physically held** | Cooperative stop, with an unconditional modifier release on every exit path |
-| Abort was "fling the mouse into a screen corner", via the same X11 path that may be dead | A real abort key read from `/dev/input`, working regardless of focus |
-| Gaussian delays, clamped — piling up at the clamp in a way no hand produces | Lognormal intervals, which is the distribution real keystrokes follow |
-| The virtual keyboard was named after the program, in a world-readable file | It is modelled on a keyboard the machine already has, down to the capability bitmap |
-| One character at a time through the clipboard for anything non-ASCII, destroying what you had copied | Typographic characters fold to ASCII; the clipboard is a last resort, and it is restored |
-| Hardcoded US QWERTY assumptions | The active XKB layout is compiled and queried, so non-US layouts type correctly |
-| 830 lines in one file, no tests | A Rust crate with over 200 tests, including the statistical ones that check the cadence model |
+- **An honest estimate.** The ETA is the sum of the schedule that will actually
+  be typed — pauses and corrections included — not characters × interval.
+- **Pacing that does not drift.** Deadline-based, so a long run lands on its
+  estimate, and a stop interrupts a long pause instead of waiting it out.
+- **A stop that always lets go.** Cooperative, with an unconditional release of
+  every key and modifier on every exit path. A stuck Shift or Ctrl outlives the
+  program and wrecks the session, so this is the property tested hardest.
+- **An abort key that works anywhere.** Read from `/dev/input`, so it works no
+  matter which window has focus, and on Wayland, where applications cannot
+  register global hotkeys at all.
+- **Your layout, not a US one.** The active XKB layout is compiled and queried,
+  so non-US layouts type correctly.
+- **Your clipboard back.** Typographic characters fold to ASCII; the clipboard
+  is a last resort for characters no key can produce, and it is restored.
 
 ---
 
 ## Install
 
-OpenAutoTyper is a Rust program: a command-line tool, `openautotyper`, and an
-[egui](https://github.com/emilk/egui) window, `openautotyper-gui`, from one
-crate. Rust 1.92 or newer builds it.
+Rust 1.92 or newer builds it.
 
 ```bash
-cargo install --path .                      # both programs
+cargo install --path .                        # both programs
 cargo install --path . --no-default-features  # command line only, no window
 ```
 
@@ -85,13 +88,21 @@ The window's **Open file…** button uses your desktop's file-chooser portal
 
 ### Arch Linux
 
-A `PKGBUILD` is in `packaging/`. It builds the crate, and installs both programs,
-the udev rule, the icon and the desktop entry for you, so the only step left is
-the `input` group:
+The `PKGBUILD` in `packaging/` builds the tagged release. It installs both
+programs, the udev rule, the icon and the desktop entry, so the only step left
+is the `input` group:
 
 ```bash
 cd packaging && makepkg -si
 sudo usermod -aG input "$USER"
+```
+
+To build a package from the commit you have checked out, rather than from a
+published tag:
+
+```bash
+packaging/build-local.sh          # writes dist/openautotyper-*.pkg.tar.zst
+sudo pacman -U dist/openautotyper-*.pkg.tar.zst
 ```
 
 ### Linux: one-time permission setup
@@ -127,23 +138,34 @@ The text comes from `--file`, `--text`, `--clipboard`, or standard input.
 | `--typos RATE` | Mistype and correct, 0 to 0.25. The finished text is identical. |
 | `--panic-key KEY` | What aborts, e.g. `KEY_ESC` (default) or `KEY_F12`. |
 | `--any-key-stops` | Abort the moment you touch the keyboard. |
+| `--backend NAME` | Force `uinput` or `x11` instead of the automatic choice. |
 | `--doctor` | Diagnose this machine's setup. |
+| `--list-backends` | Every backend, and why it can or cannot run. |
 
 `--variance`, `--rhythm`, `--hesitation`, `--sentence-pause`, `--max-pause` and
 `--drift` change the character of the typing. None of them changes its speed;
 see below.
 
 Settings persist in `~/.config/openautotyper/config.toml`. Command-line flags
-override the file for that run.
+override the file for that run. Keys the program does not recognise are kept
+when it saves, so a setting added by hand, or by a newer release, survives.
+
+### The window
+
+`openautotyper-gui` (or `openautotyper --gui`) is the same engine with a
+window: paste or open text, pick a preset — **Careful**, **Natural**, **Brisk**
+or **Machine** — or open *Rhythm and safety* for every dial, then **Start
+typing** (`Ctrl+Enter`). **Pause**, **Stop** and `Esc` work while it types, and
+if the abort key cannot be read the window says so rather than promising one.
+
+If it cannot open at all it says why in a dialog, because a launcher started
+from a menu has nowhere to print an error.
 
 ### Stopping
 
-Press **Esc** on your keyboard. It is read directly from the input devices
-rather than registered with the desktop, so it works no matter which window has
-focus, and on Wayland, where applications cannot register global hotkeys at all.
-
-`Ctrl+C` in the terminal and the Stop button in the GUI both work too. Whichever
-you use, every modifier is released before the program lets go of the keyboard.
+Press **Esc** on your keyboard. `Ctrl+C` in the terminal and the Stop button in
+the window both work too. Whichever you use, every modifier is released before
+the program lets go of the keyboard.
 
 ---
 
@@ -152,8 +174,8 @@ you use, every modifier is released before the program lets go of the keyboard.
 Things that are true of people at keyboards, each of which the model implements:
 
 - **Intervals are lognormal.** The distribution has a hard floor, a dense body
-  and a long right tail. Sampling a Gaussian and clamping it — v1's approach —
-  produces a spike at the clamp that no hand makes.
+  and a long right tail. Sampling a Gaussian and clamping it produces a spike
+  at the clamp that no hand makes.
 - **Finger travel dominates rhythm.** Consecutive keys struck by the same finger
   are much slower than keys that alternate hands. This is the largest single
   source of texture in real typing, and it is why `ed` takes longer than `th`.
@@ -164,30 +186,30 @@ Things that are true of people at keyboards, each of which the model implements:
   evenly across words.
 - **Hold time is half of keystroke timing.** Every keydown a page receives is
   paired with a keyup, and how long the key was held is as characteristic as
-  the gap between keys — more so, because it barely varies with what is being
-  typed. The mean falls as speed rises, the way real hands do.
+  the gap between keys. The mean falls as speed rises, the way real hands do:
+  roughly 110 ms at 30 wpm, 95 at 70, 70 at 120. Holds are capped well under
+  the kernel's autorepeat delay, so a long hold can never type a character the
+  text did not contain.
+- **Keys overlap.** The next key often goes down before the last comes up. One
+  finger is never on two keys, and no key is pressed while it is already down.
 - **Shift is a keystroke.** A capital is two presses, and the first is the one
   that gives a typer away: pressed with the letter it modifies, Shift and the
   letter arrive in the same millisecond, which no hand does. Here it leads by
-  50–150 ms and lingers past the letter's own release — measured on the wire,
-  a mean lead of 71 ms and a mean lag of 48 ms.
-- **Typing warms up and tires.** A mean-reverting walk wanders but never *goes*
-  anywhere; over three thousand characters the first and last thirds used to
-  come out 173.1 ms and 175.7 ms apart, which is to say identical. The pace now
-  starts below its settled rate, finds it over a paragraph or two, and gives
-  some of it back by the end.
+  a mean of about 75 ms and lingers about 50 ms past the letter's own release,
+  and a run of capitals holds one continuous Shift.
+- **Typing warms up and tires.** The pace starts a few percent below its settled
+  rate, finds it over a paragraph or two, and gives some of it back over the
+  first few pages.
 
 **The WPM dial is honest, to within a few percent.** Every setting above shapes
 the rhythm and none of them moves the average, so 70 wpm means 70 wpm end to
 end, pauses and corrections included. It is not exact, on purpose: normalising
-each schedule to the requested rate made total duration a function of length and
-dial alone — identical to the microsecond on every run of one document, which is
-a fingerprint across runs even though the rhythm inside differed every time. So
-each run draws its own pace for the day. Over sixty runs the mean comes back to
-70.0 wpm with a spread of 2.4. `--flat` still gives an exact metronome.
-
-The ETA is the sum of the schedule that will actually be typed, so it moves with
-the run rather than reporting the nominal rate and being wrong.
+each schedule to the requested rate would make the total duration a function of
+length and dial alone — identical to the microsecond on every run of one
+document, which is a fingerprint across runs even though the rhythm inside
+differed every time. So each run draws its own pace for the day, and the
+average over many runs is the rate you asked for. `--flat` gives an exact
+metronome.
 
 ---
 
@@ -195,12 +217,12 @@ the run rather than reporting the nominal rate and being wrong.
 
 Typing through `/dev/uinput` means the kernel presents the device as a real
 keyboard, so the compositor routes it like one. That is worth nothing if the
-device then announces itself, and `/proc/bus/input/devices` is world-readable.
-The defaults `python-evdev` hands out said:
+device then announces itself, and `/proc/bus/input/devices` is world-readable. A
+freshly created uinput device announces itself in four ways:
 
 ```
 N: Name="OpenAutoTyper Virtual Keyboard"
-P: Phys=py-evdev-uinput
+P: Phys=
 B: EV=200003
 ```
 
@@ -214,12 +236,13 @@ B: MSC=10
 B: LED=7
 ```
 
-Four separate giveaways, and the name is only the loudest — `Phys` still said
-py-evdev after any rename, and the capability bitmap described a keyboard with
-force feedback, no Caps Lock light, no autorepeat and no scancodes: a device
-that has never existed. So the identity is now modelled on a keyboard the
-machine genuinely has, the capabilities are a keyboard's, and every key event
-is preceded by the `MSC_SCAN` that real hardware sends.
+The name is the loudest giveaway, but an empty `Phys` and a capability bitmap
+that describes a keyboard with force feedback, no Caps Lock light, no autorepeat
+and no scancodes are a device that has never existed. So the identity is modelled
+on a keyboard the machine genuinely has — same name and ids, a neighbouring USB
+port — the capabilities are a keyboard's, and every key event is preceded by the
+`MSC_SCAN` that real hardware sends. A test creates the device and reads the
+kernel's own listing back to check it.
 
 **What it does not hide.** The kernel puts every uinput device under
 `/sys/devices/virtual/input/`, and nothing a userspace process passes to
@@ -263,12 +286,15 @@ linked, so a minimal machine still gets the built-in US layout.
 
 ```bash
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
-The device tests that read keystrokes back off `/dev/input` need the `input`
-group *and* grab the virtual keyboard first, so a test can never type into
-whatever window you have open. Without the permission they skip, and say so.
+There are over 200 tests. The timing ones are statistical — they check that the
+delivered rate, the hold times, the rollover and the Shift lead behave like
+typing, not just that the code runs. The device tests that read keystrokes back
+off `/dev/input` need the `input` group *and* grab the virtual keyboard first,
+so a test can never type into whatever window you have open. Without the
+permission they skip, and say so.
 
 ---
 

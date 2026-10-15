@@ -3,8 +3,7 @@
 //! Only correct on a real X11 session. Under Wayland this still "works" in the
 //! sense that `XOpenDisplay` succeeds -- XWayland is running -- but the
 //! keystrokes reach XWayland clients only. So the probe reports the session
-//! type and refuses to volunteer under Wayland; a user who knows their target
-//! is an X11 app can still ask for it by name.
+//! type and refuses to run under Wayland at all, by name or otherwise.
 //!
 //! The keycode table is shared with the uinput backend: X11 keycodes are evdev
 //! scancodes plus 8, so one XKB layout serves both.
