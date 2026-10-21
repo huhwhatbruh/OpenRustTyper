@@ -165,7 +165,25 @@ fn the_summary_counts_and_estimates() {
     assert!(r.err.contains("would type: 13 chars"), "{}", r.err);
     assert!(r.err.contains("3 words"), "{}", r.err);
     assert!(r.err.contains("at 60 wpm"), "{}", r.err);
-    assert!(r.err.contains("text delivered exactly: True"), "{}", r.err);
+    assert!(r.err.contains("-- dry run: 13 characters"), "{}", r.err);
+}
+
+#[test]
+fn a_dry_run_says_which_characters_need_the_clipboard() {
+    // The dry run used to accept every character, so it could not tell you
+    // that a real run would have to reach for the clipboard.
+    let r = run(&["--dry-run", "-t", "hi \u{1F600}"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.out, "hi \u{1F600}");
+    assert!(r.err.contains("clipboard"), "{}", r.err);
+}
+
+#[test]
+fn an_unknown_panic_key_is_refused_before_anything_is_typed() {
+    // It used to print "press FOO" while the watcher fell back to Escape.
+    let r = run(&["--dry-run", "-t", "x", "--panic-key", "KEY_NOT_A_KEY", "-q"]);
+    assert_eq!(r.code, 2);
+    assert!(r.err.contains("unknown panic key"), "{}", r.err);
 }
 
 #[test]

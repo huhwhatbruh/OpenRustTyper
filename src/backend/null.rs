@@ -125,4 +125,8 @@ impl Backend for NullBackend {
     fn recorded_text(&self) -> Option<String> {
         Some(self.text())
     }
+
+    fn pasted(&self) -> &[String] {
+        &self.pasted
+    }
 }

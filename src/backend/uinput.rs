@@ -604,6 +604,10 @@ impl Backend for UInputBackend {
     fn device_path(&self) -> Option<String> {
         self.device_path.clone()
     }
+
+    fn owns_device_node(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for UInputBackend {

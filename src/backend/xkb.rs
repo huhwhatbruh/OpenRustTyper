@@ -117,9 +117,12 @@ fn configured_layout() -> (Names, String) {
     }
 
     // localectl reports what the session was actually configured with, and is
-    // the only source that works identically under X11 and Wayland.
+    // the only source that works identically under X11 and Wayland. Its labels
+    // are translated, so a German locale says "X11 Tastaturbelegung" and every
+    // parse below fails -- which silently typed US QWERTY on a non-US machine.
     let out = Command::new("localectl")
         .arg("status")
+        .env("LC_ALL", "C")
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -238,7 +241,17 @@ impl Lib {
 ///
 /// Falls back to a built-in US QWERTY table when libxkbcommon is unavailable,
 /// so the backend still works on a minimal system.
+///
+/// Cached: compiling a keymap and walking every key at every level costs
+/// milliseconds and a `localectl` subprocess, and the answer cannot change
+/// inside one process. It is asked for by every backend construction, by
+/// `--doctor` and by the window's backend chip.
 pub fn load_layout() -> Layout {
+    static CACHED: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+    CACHED.get_or_init(load_layout_uncached).clone()
+}
+
+fn load_layout_uncached() -> Layout {
     let Some(lib) = Lib::load() else {
         return fallback("no libxkbcommon");
     };

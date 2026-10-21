@@ -64,6 +64,12 @@ const SPIN_THRESHOLD: Duration = Duration::from_micros(1500);
 /// visibly wrong and the fastest way to overrun an input field.
 const SLIP_FORGIVENESS: f64 = 0.05;
 
+/// How often a wait wakes to look at the pause flag. Sleeping the whole interval
+/// -- which can be a sentence pause of nearly two seconds -- meant Pause took
+/// effect only after that interval had elapsed, while the window already said it
+/// was paused.
+const PAUSE_POLL: Duration = Duration::from_millis(50);
+
 /// Waits out an event schedule without drifting and without blocking abort.
 pub struct Pacer {
     stop: Flag,
@@ -129,7 +135,11 @@ impl Pacer {
             };
 
             if remaining > SPIN_THRESHOLD {
-                if self.stop.wait(remaining - SPIN_THRESHOLD) {
+                let mut timeout = remaining - SPIN_THRESHOLD;
+                if self.pause.is_some() {
+                    timeout = timeout.min(PAUSE_POLL);
+                }
+                if self.stop.wait(timeout) {
                     return false;
                 }
             } else {

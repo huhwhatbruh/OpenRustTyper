@@ -23,6 +23,9 @@ struct Tools {
     paste: &'static [&'static str],
 }
 
+/// A finder for one family of clipboard tools.
+type ToolsFn = fn() -> Option<Tools>;
+
 pub(crate) fn which(program: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|dir| {
@@ -35,14 +38,14 @@ pub(crate) fn which(program: &str) -> bool {
     })
 }
 
-/// `(copy_cmd, paste_cmd)` for this session, or `None`.
-fn tools() -> Option<Tools> {
-    if which("wl-copy") && which("wl-paste") {
-        return Some(Tools {
-            copy: &["wl-copy"],
-            paste: &["wl-paste", "--no-newline"],
-        });
-    }
+fn wl_tools() -> Option<Tools> {
+    (which("wl-copy") && which("wl-paste")).then_some(Tools {
+        copy: &["wl-copy"],
+        paste: &["wl-paste", "--no-newline"],
+    })
+}
+
+fn x_tools() -> Option<Tools> {
     if which("xclip") {
         return Some(Tools {
             copy: &["xclip", "-selection", "clipboard"],
@@ -56,6 +59,22 @@ fn tools() -> Option<Tools> {
         });
     }
     None
+}
+
+/// `(copy_cmd, paste_cmd)` for the session actually running, or `None`.
+///
+/// Both sets can be installed at once, and picking the wrong one is not a
+/// detail: `wl-copy` on an X11 session, or `xclip` under a Wayland compositor
+/// without XWayland, fails at the moment the fallback is needed. The session
+/// variables decide; installed-but-inapplicable tools come second.
+fn tools() -> Option<Tools> {
+    let present = |name: &str| std::env::var_os(name).is_some_and(|v| !v.is_empty());
+    let (native, other): (ToolsFn, ToolsFn) = if present("WAYLAND_DISPLAY") || !present("DISPLAY") {
+        (wl_tools, x_tools)
+    } else {
+        (x_tools, wl_tools)
+    };
+    native().or_else(other)
 }
 
 /// Whether clipboard fallback can work here.
@@ -135,18 +154,27 @@ pub fn write(text: &str) -> bool {
 }
 
 /// Put `text` on the clipboard, paste it, then restore what was there.
+///
+/// Refuses when the current contents cannot be read first. Taking the clipboard
+/// destroys what the previous owner had -- including an image or a file
+/// selection that the CLI tools cannot hand back -- so "I could not save it, I
+/// pasted anyway" is exactly the data loss this module exists to avoid. The
+/// caller reports the character as skipped instead.
 pub fn paste_via_clipboard(text: &str, send_ctrl_v: impl FnOnce() -> bool) -> bool {
-    let saved = read();
+    let Some(saved) = read() else {
+        return false;
+    };
     if !write(text) {
         return false;
     }
     let sent = send_ctrl_v();
     if sent {
+        // The paste is asynchronous: the target asks the clipboard owner for
+        // the data after receiving Ctrl+V. Restoring before that loses the race
+        // and pastes the old contents instead.
         std::thread::sleep(PASTE_GRACE);
     }
-    if let Some(saved) = saved {
-        write(&saved);
-    }
+    write(&saved);
     sent
 }
 

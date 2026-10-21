@@ -19,7 +19,6 @@ use std::time::Duration;
 use crate::backend::codes::{self, KEY_A, KEY_ESC};
 
 const EV_KEY: u16 = 0x01;
-const EV_MAX: usize = 0x1f;
 
 /// `EVIOCGBIT(ev, len)`: which event codes of type `ev` the device can emit.
 const fn eviocgbit(ev: usize, len: usize) -> libc::c_ulong {
@@ -53,14 +52,46 @@ fn readable_devices() -> Vec<PathBuf> {
 
 /// Whether the panic watcher can run for this user.
 pub fn available() -> (bool, String) {
-    let n = readable_devices().len();
-    if n == 0 {
+    let keyboards = readable_devices()
+        .into_iter()
+        .filter(|path| {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+                .ok()
+                .is_some_and(|file| is_keyboard(file.as_raw_fd()))
+        })
+        .count();
+    if keyboards == 0 {
         return (
             false,
-            "no readable devices in /dev/input (add yourself to group 'input')".into(),
+            "no readable keyboard in /dev/input (add yourself to group 'input')".into(),
         );
     }
-    (true, format!("watching {n} device(s)"))
+    (true, format!("watching {keyboards} keyboard(s)"))
+}
+
+/// Normalise and validate an evdev key name, e.g. `f12` -> `KEY_F12`.
+///
+/// The watcher used to fall back to Escape on an unknown name, so `--panic-key
+/// KEY_FOO` printed "press FOO" and watched Escape: the one instruction the
+/// user was given did nothing. An unknown name has to be refused, not guessed
+/// at.
+pub fn resolve_key(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let key = if upper.starts_with("KEY_") {
+        upper
+    } else {
+        format!("KEY_{upper}")
+    };
+    if trimmed.is_empty() {
+        return Err("no abort key given".into());
+    }
+    codes::key_code(&key).map(|_| key).ok_or_else(|| {
+        format!("unknown panic key {name:?} \u{2014} use an evdev name such as KEY_F12")
+    })
 }
 
 /// Whether this device can produce both letters and Escape -- a keyboard, as
@@ -235,7 +266,6 @@ fn run(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    let _ = EV_MAX;
 }
 
 #[cfg(test)]
@@ -253,6 +283,16 @@ mod tests {
         let (ok, why) = available();
         assert!(!why.is_empty());
         assert_eq!(ok, why.starts_with("watching"));
+    }
+
+    #[test]
+    fn a_key_name_is_normalised_and_validated() {
+        assert_eq!(resolve_key("f12"), Ok("KEY_F12".into()));
+        assert_eq!(resolve_key("KEY_ESC"), Ok("KEY_ESC".into()));
+        // An unknown name must not become Escape by accident: the caller
+        // prints the key it was given, and that instruction has to work.
+        assert!(resolve_key("KEY_NOT_A_KEY").is_err());
+        assert!(resolve_key("  ").is_err());
     }
 
     #[test]

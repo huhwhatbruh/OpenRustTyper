@@ -325,6 +325,18 @@ impl Cadence {
             "variance must be between 0 and 2",
         )?;
         check(
+            (0.0..=1.0).contains(&self.rhythm),
+            "rhythm must be between 0 and 1",
+        )?;
+        check(
+            (0.0..=1.0).contains(&self.hesitation),
+            "hesitation must be between 0 and 1",
+        )?;
+        check(
+            (0.0..=1.0).contains(&self.drift),
+            "drift must be between 0 and 1",
+        )?;
+        check(
             (0.0..=0.25).contains(&self.typo_rate),
             "typo_rate must be between 0 and 0.25",
         )?;
@@ -678,12 +690,22 @@ fn release_times(
                 }
             }
 
-            // Whatever the clamps above decided, the release must still land
-            // after its own press and before the same key is struck again.
-            release = release.max(press_at[i] + MIN_DWELL);
-            if same_cap {
-                release = release.min(press_at[i + 1] - 0.0005);
-            }
+            // Last word for a key that has to be up before the next one: the
+            // release must fall strictly between its own press and that press.
+            // At extreme speed a lognormal tail can compress an interval below
+            // the minimum dwell, and letting the dwell win there puts a release
+            // at or before its own press -- an up with no down, followed by a
+            // key left held -- or after the next press of the same key, which
+            // swallows that character. Ordering and "one finger, one key"
+            // outrank hold time. Other pairs are allowed to roll over.
+            let half = span * 0.5;
+            let earliest = press_at[i] + MIN_DWELL.min(half);
+            release = if same_cap || same_finger {
+                let latest = press_at[i + 1] - gap.min(half);
+                release.max(earliest).min(latest)
+            } else {
+                release.max(earliest)
+            };
         } else {
             release = release.max(press_at[i] + MIN_DWELL);
         }
@@ -761,26 +783,48 @@ fn schedule_modifiers(
 ) -> Timeline {
     let mut events = Vec::new();
     for (name, first, last) in modifier_runs(presses, modifiers_of) {
-        let lead = MODIFIER_LEAD * rng.gauss(0.0, MODIFIER_LEAD_SIGMA).exp();
-        let mut down = press_at[first] - lead;
-        // Reaching for Shift begins after the previous keystroke has begun,
-        // not before it -- but it may well overlap that key's release.
-        if first > 0 {
-            down = down.max(press_at[first - 1] + EPSILON);
+        // Reaching for Shift begins after the previous keystroke has been
+        // pressed, not before it: a modifier that goes down early changes the
+        // character before its own. It may well overlap that key's release.
+        let earliest_down = if first > 0 {
+            press_at[first - 1] + EPSILON
+        } else {
+            0.0
+        };
+        let latest_down = press_at[first] - EPSILON / 2.0;
+        if latest_down <= earliest_down {
+            // The two keys are closer together than the modifier needs to
+            // travel. Placing it anyway puts it down over the character before,
+            // which produces different text -- so the run is left unscheduled
+            // and the backend presses the modifier with its own key.
+            continue;
         }
-        down = down.min(press_at[first] - EPSILON / 2.0);
-        down = down.max(0.0);
+
+        let lead = MODIFIER_LEAD * rng.gauss(0.0, MODIFIER_LEAD_SIGMA).exp();
+        let down = (press_at[first] - lead).max(earliest_down).min(latest_down);
 
         let lag = MODIFIER_LAG * rng.gauss(0.0, MODIFIER_LAG_SIGMA).exp();
         let mut up = release_at[last] + lag;
         // The character is fixed once its key is down, so the modifier is free
-        // to lift from that instant -- but never before it.
-        up = up.max(press_at[last] + EPSILON);
+        // to lift from that instant -- but never before it, and never before
+        // its own press.
+        let earliest_up = (press_at[last] + EPSILON).max(down + EPSILON);
+        up = up.max(earliest_up);
         // And it must be gone before any key that does not want it.
         if last + 1 < presses.len() {
-            up = up.min(press_at[last + 1] - EPSILON);
+            let span = press_at[last + 1] - press_at[last];
+            let latest_up = press_at[last + 1] - EPSILON.min(span * 0.5);
+            if latest_up <= earliest_up {
+                // No room to hold the modifier for any length of time at all.
+                // Dropping the run is still correct: the backend presses the
+                // modifier together with the key when a scheduled one is not
+                // there. Keeping it would either hold Shift over a character
+                // that never asked for it -- wrong text -- or release it before
+                // it was pressed.
+                continue;
+            }
+            up = up.min(latest_up);
         }
-        up = up.max(down + EPSILON);
 
         events.push((down, Action::Down, name.clone(), None));
         events.push((up, Action::Up, name, None));
@@ -1590,5 +1634,104 @@ mod tests {
         let lo = intervals.iter().cloned().fold(f64::MAX, f64::min);
         let hi = intervals.iter().cloned().fold(f64::MIN, f64::max);
         assert!(hi - lo < 1e-9, "{}", hi - lo);
+    }
+
+    // -- The clamps at the extremes ------------------------------------------
+    // Everything above is about ordinary typing. At 2000 wpm with the widest
+    // spread the model allows, a lognormal tail can compress an interval below
+    // the minimum hold, and the clamp that decides when a key comes up has to
+    // choose between hold time and ordering. Ordering is not negotiable: a
+    // release at or before its own press is an up with no down, and a release
+    // after the next press of the same key means the kernel sees a repeat and
+    // drops the character.
+    #[test]
+    fn a_release_never_overtakes_its_own_press_at_any_speed() {
+        let extreme = Cadence {
+            wpm: 2000.0,
+            variance: 2.0,
+            drift: 0.0,
+            sentence_pause: 0.0,
+            ..Cadence::default()
+        };
+        for text in [
+            "aa".repeat(40),
+            "ed".repeat(40),
+            "ll".repeat(40),
+            "the quick brown fox ".repeat(10),
+        ] {
+            for seed in [1, 7] {
+                let events = plan_seeded(&text, &extreme, seed);
+                let mut held: std::collections::HashSet<&str> = Default::default();
+                for event in &events {
+                    match event.action {
+                        Action::Down => {
+                            assert!(
+                                held.insert(&event.value),
+                                "{} pressed while held",
+                                event.value
+                            );
+                        }
+                        Action::Up => {
+                            assert!(
+                                held.remove(event.value.as_str()),
+                                "up without down: {}",
+                                event.value
+                            );
+                        }
+                    }
+                }
+                assert!(held.is_empty(), "{held:?}");
+                assert!(
+                    stroke_stats(&events).dwell.iter().all(|d| *d > 0.0),
+                    "a hold collapsed to nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_modifier_is_never_still_held_when_an_unmodified_key_is_struck() {
+        // The extreme-speed version of the correctness rule above. When the
+        // schedule is too tight to hold Shift for any length of time, the run is
+        // dropped and the backend presses Shift with its own key -- which still
+        // produces the capital. Keeping it would capitalise the next letter.
+        for wpm in [400.0, 2000.0] {
+            let cadence = Cadence {
+                wpm,
+                variance: 2.0,
+                drift: 0.0,
+                ..Cadence::default()
+            };
+            let events = plan(&"Ab".repeat(30), &cadence, Some(3), Some(&us_modifiers)).unwrap();
+            let mut shift_down = false;
+            for (_moment, action, value) in absolute(&events) {
+                if value == SHIFT {
+                    shift_down = action == Action::Down;
+                } else if action == Action::Down && value == "b" {
+                    assert!(!shift_down, "Shift still held at {wpm} wpm");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_shape_knobs_are_rejected() {
+        // The help says 0-1; a value outside it has no meaning in the model.
+        for bad in [
+            Cadence {
+                rhythm: 1.5,
+                ..Cadence::default()
+            },
+            Cadence {
+                hesitation: -0.1,
+                ..Cadence::default()
+            },
+            Cadence {
+                drift: 2.0,
+                ..Cadence::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
     }
 }

@@ -17,7 +17,7 @@ mkdir -p "$out"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-git -C "$root" archive --prefix="OpenAutoTyper-$version/" HEAD | gzip > "$work/openautotyper-$version.tar.gz"
+git -C "$root" archive --prefix="OpenRustTyper-$version/" HEAD | gzip > "$work/openautotyper-$version.tar.gz"
 sed -e 's|^source=.*|source=("$pkgname-$pkgver.tar.gz")|' \
     -e "s|^sha256sums=.*|sha256sums=('SKIP')|" \
     "$root/packaging/PKGBUILD" > "$work/PKGBUILD"

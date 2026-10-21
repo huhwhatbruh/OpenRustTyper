@@ -7,6 +7,7 @@
 //! values are ignored rather than fatal: a corrupt config should cost you your
 //! preferences, not the ability to start the program.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
@@ -242,8 +243,21 @@ impl Settings {
 
         // Atomic replace: a crash mid-write must not leave a truncated file.
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, out)?;
-        std::fs::rename(&tmp, path)
+        let mut file = std::fs::File::create(&tmp)?;
+        // Flush to disk before the rename. The rename is atomic, but without
+        // this a power loss can leave the new name pointing at blocks that were
+        // never written -- an empty config.
+        let written = file
+            .write_all(out.as_bytes())
+            .and_then(|()| file.sync_all());
+        drop(file);
+        let replaced = written.and_then(|()| std::fs::rename(&tmp, path));
+        if let Err(e) = replaced {
+            // Do not leave a half-written .tmp beside a good config.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
     }
 }
 

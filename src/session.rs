@@ -99,9 +99,9 @@ pub struct RunResult {
     pub skipped: Vec<(usize, String)>,
     /// Seconds the schedule fell behind because the machine was busy.
     pub slip: f64,
-    /// Whether the abort key was actually watching during this run. False means
-    /// one was asked for and could not be attached -- the run went ahead with no
-    /// kill switch, which the caller has to be able to say out loud.
+    /// Whether a keyboard kill switch was live for this run. False covers both
+    /// "none was asked for" and "one was asked for and could not be attached";
+    /// either way the caller must not tell the user that a key will stop it.
     pub panic_active: bool,
 }
 
@@ -111,7 +111,7 @@ impl RunResult {
     }
 }
 
-type ProgressFn = Box<dyn Fn(Progress) + Send + Sync>;
+type ProgressFn = Arc<dyn Fn(Progress) + Send + Sync>;
 
 /// Options for [`TypeSession::new`].
 pub struct SessionOptions {
@@ -146,6 +146,20 @@ struct Shared {
     pause: Flag,
     state: AtomicU8,
     reason: Mutex<String>,
+    /// The last progress snapshot, so pause and resume can publish an honest
+    /// one without the worker.
+    snapshot: Mutex<Option<Progress>>,
+    on_progress: Option<ProgressFn>,
+}
+
+impl Shared {
+    fn publish(&self, progress: Progress) {
+        *self.snapshot.lock().unwrap() = Some(progress.clone());
+        if let Some(f) = &self.on_progress {
+            // A failing UI callback must never take the typing down with it.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(progress)));
+        }
+    }
 }
 
 /// A cloneable handle for steering a session from another thread.
@@ -168,13 +182,33 @@ impl Control {
     }
 
     pub fn pause(&self) {
-        if self.state() == State::Typing {
-            self.0.pause.set();
+        if self.state() != State::Typing || self.0.pause.is_set() {
+            return;
+        }
+        self.0.pause.set();
+        // Progress is normally published after an event fires, and a paused run
+        // is waiting before one fires -- so without this the window showed
+        // "typing" for as long as the pause lasted.
+        //
+        // Clone out of the lock first: the guard from an `if let` scrutinee
+        // lives for the whole body, and `publish` takes the same lock.
+        let snapshot = self.0.snapshot.lock().unwrap().clone();
+        if let Some(mut progress) = snapshot {
+            progress.state = State::Paused;
+            self.0.publish(progress);
         }
     }
 
     pub fn resume(&self) {
+        if !self.0.pause.is_set() {
+            return;
+        }
         self.0.pause.clear();
+        let snapshot = self.0.snapshot.lock().unwrap().clone();
+        if let Some(mut progress) = snapshot {
+            progress.state = State::Typing;
+            self.0.publish(progress);
+        }
     }
 
     pub fn paused(&self) -> bool {
@@ -192,7 +226,6 @@ pub struct TypeSession {
     countdown: f64,
     panic_key: Option<String>,
     any_key_stops: bool,
-    on_progress: Option<ProgressFn>,
     min_gap: Duration,
     realtime: bool,
     pub events: Vec<Event>,
@@ -208,6 +241,8 @@ pub struct TypeSession {
     typed: usize,
     last_emit: Option<Instant>,
     panic_active: bool,
+    /// Whether the slip the next backspace exists to undo was never typed.
+    lost_slip: bool,
 }
 
 impl TypeSession {
@@ -240,7 +275,6 @@ impl TypeSession {
             countdown: opts.countdown.max(0.0),
             panic_key: opts.panic_key,
             any_key_stops: opts.any_key_stops,
-            on_progress: opts.on_progress,
             min_gap: if opts.progress_hz > 0.0 {
                 Duration::from_secs_f64(1.0 / opts.progress_hz)
             } else {
@@ -256,10 +290,14 @@ impl TypeSession {
                 pause: Flag::new(),
                 state: AtomicU8::new(State::Idle as u8),
                 reason: Mutex::new("stopped by user".into()),
+                snapshot: Mutex::new(None),
+                on_progress: opts.on_progress,
             })),
             typed: 0,
             last_emit: None,
-            panic_active: true,
+            // Nothing is watching until a watcher has actually opened a device.
+            panic_active: false,
+            lost_slip: false,
         })
     }
 
@@ -292,6 +330,7 @@ impl TypeSession {
         let mut skipped: Vec<(usize, String)> = Vec::new();
         let mut watcher: Option<PanicWatcher> = None;
         let mut opened = false;
+        self.lost_slip = false;
 
         let result = (|| {
             if let Err(e) = self.backend.open() {
@@ -301,6 +340,14 @@ impl TypeSession {
 
             if self.panic_key.is_some() || self.any_key_stops {
                 let exclude: Vec<String> = self.backend.device_path().into_iter().collect();
+                // "Any key" reads the real keyboards. A backend that creates a
+                // virtual one has to tell the watcher which node is ours, or the
+                // first character typed aborts the run; a backend with no node
+                // at all (XTEST) cannot be us. If the node exists but could not
+                // be identified, drop the any-key half rather than aborting
+                // every run on its own first keystroke.
+                let any_key =
+                    self.any_key_stops && (!self.backend.owns_device_node() || !exclude.is_empty());
                 let key = self.panic_key.clone().unwrap_or_else(|| "KEY_ESC".into());
                 let stopper = ctl.clone();
                 let label = self.panic_key.clone().unwrap_or_else(|| "a key".into());
@@ -308,7 +355,7 @@ impl TypeSession {
                     move || stopper.stop(&format!("aborted with {label}")),
                     &key,
                     exclude,
-                    self.any_key_stops,
+                    any_key,
                 );
                 // The watcher needs to read /dev/input/event*, which is a
                 // different permission from the /dev/uinput the typing needs: a
@@ -412,6 +459,14 @@ impl TypeSession {
         index: Option<usize>,
         skipped: &mut Vec<(usize, String)>,
     ) -> Result<(), crate::backend::BackendError> {
+        if self.lost_slip && value == "backspace" {
+            // The mistyped key this exists to erase was never typed -- the
+            // layout could not produce it, and the clipboard could not take it
+            // -- so pressing backspace now would delete a character of the real
+            // text instead of the slip.
+            self.lost_slip = false;
+            return Ok(());
+        }
         let mut ok = self.backend.key_down(value)?;
         if !ok && value.chars().count() == 1 {
             // No keystroke reaches this character on this layout; the clipboard
@@ -419,11 +474,20 @@ impl TypeSession {
             // paste.
             ok = self.backend.paste(value);
         }
+        if value.chars().count() == 1 && index.is_none() {
+            // This is a slip, not a character of the text: remember whether the
+            // correction that follows has anything to correct.
+            self.lost_slip = !ok;
+        }
         if let Some(index) = index {
             if !ok {
                 skipped.push((index, value.to_string()));
+            } else {
+                // Characters delivered, not positions reached: a character
+                // nothing could type must not be counted as typed in the
+                // summary.
+                self.typed += 1;
             }
-            self.typed = index + 1;
         }
         Ok(())
     }
@@ -458,7 +522,7 @@ impl TypeSession {
     }
 
     fn emit(&mut self, pacer: &Pacer, event_index: usize) {
-        if self.on_progress.is_none() {
+        if self.control.0.on_progress.is_none() {
             return;
         }
         let now = Instant::now();
@@ -485,10 +549,7 @@ impl TypeSession {
     }
 
     fn publish(&self, progress: Progress) {
-        if let Some(f) = &self.on_progress {
-            // A failing UI callback must never take the typing down with it.
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(progress)));
-        }
+        self.control.0.publish(progress);
     }
 
     fn finish(
@@ -715,6 +776,41 @@ mod tests {
         assert!(r.completed());
         assert_eq!(r.skipped, vec![(1, "\u{20AC}".to_string())]);
         assert_eq!(typed_text(&s), "ab");
+        // "Typed" has to mean delivered. Counting a position as complete when
+        // the character was skipped made the summary claim text that never
+        // arrived.
+        assert_eq!(r.typed, 2);
+    }
+
+    #[test]
+    fn a_correction_for_a_slip_that_never_landed_is_not_pressed() {
+        // A backspace after a mistype that could not be typed deletes real text.
+        // The neighbour the model picked is unreachable on this layout, and the
+        // clipboard cannot take it either. The old engine pressed the correction
+        // anyway, so every failed slip ate the character just typed.
+        let text = "e".repeat(40);
+        let cadence = Cadence {
+            wpm: 2000.0,
+            typo_rate: 0.25,
+            ..Default::default()
+        };
+        for seed in 0..6 {
+            let o = SessionOptions {
+                seed: Some(seed),
+                ..opts()
+            };
+            let mut s = TypeSession::new(
+                &text,
+                &cadence,
+                Box::new(NoClipboard(NullBackend::reaching("e"))),
+                o,
+            )
+            .unwrap();
+            let r = s.run();
+            assert!(r.completed());
+            assert_eq!(typed_text(&s), text, "seed {seed}");
+            assert!(r.skipped.is_empty(), "a failed slip is not a skip");
+        }
     }
 
     #[test]
@@ -738,6 +834,35 @@ mod tests {
         ctl.resume();
         let (r, _s) = handle.join().unwrap();
         assert!(r.completed(), "{r:?}");
+    }
+
+    #[test]
+    fn pause_is_reported_before_the_next_keystroke() {
+        // The window used to show "typing" throughout a pause: progress is
+        // published after an event fires, and a paused run is waiting for one.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let o = SessionOptions {
+            realtime: true,
+            on_progress: Some(Arc::new(move |p| sink.lock().unwrap().push(p.state))),
+            ..opts()
+        };
+        let cadence = Cadence {
+            wpm: 60.0,
+            ..Default::default()
+        };
+        let s = session(&"x".repeat(500), &cadence, NullBackend::default(), o);
+        let ctl = s.control();
+        let handle = s.spawn();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !seen.lock().unwrap().contains(&State::Typing) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ctl.pause();
+        assert!(seen.lock().unwrap().contains(&State::Paused));
+        ctl.resume();
+        ctl.stop("test finished");
+        let _ = handle.join();
     }
 
     #[test]
@@ -786,7 +911,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::<Progress>::new()));
         let sink = seen.clone();
         let o = SessionOptions {
-            on_progress: Some(Box::new(move |p| sink.lock().unwrap().push(p))),
+            on_progress: Some(Arc::new(move |p| sink.lock().unwrap().push(p))),
             progress_hz: 0.0,
             ..opts()
         };
@@ -805,7 +930,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let o = SessionOptions {
-            on_progress: Some(Box::new(move |_| {
+            on_progress: Some(Arc::new(move |_| {
                 c.fetch_add(1, Ordering::SeqCst);
                 panic!("ui blew up");
             })),
@@ -858,9 +983,12 @@ mod tests {
     }
 
     #[test]
-    fn no_abort_key_asked_for_is_not_a_warning() {
+    fn no_abort_key_asked_for_is_not_reported_as_live() {
+        // Nothing was watching, so nothing may claim to have been. The old
+        // default made "no key asked for" indistinguishable from "a key is
+        // live" to every caller that wanted to tell the user how to stop.
         let mut s = session("abc", &quick(), NullBackend::default(), opts());
-        assert!(s.run().panic_active);
+        assert!(!s.run().panic_active);
     }
 
     #[test]

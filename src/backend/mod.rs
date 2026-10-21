@@ -101,9 +101,25 @@ pub trait Backend: Send {
         None
     }
 
+    /// Whether this backend creates a virtual input device of its own.
+    ///
+    /// `device_path` alone cannot answer it: `None` means either "this backend
+    /// has no node" (XTEST) or "the node exists but could not be identified".
+    /// The any-key abort has to tell those apart, or it will fire on the first
+    /// character the program types.
+    fn owns_device_node(&self) -> bool {
+        false
+    }
+
     /// What a dry run recorded. Only the null backend has anything to say.
     fn recorded_text(&self) -> Option<String> {
         None
+    }
+
+    /// Clipboard fallbacks a dry run had to make. Only the null backend has
+    /// anything to say.
+    fn pasted(&self) -> &[String] {
+        &[]
     }
 
     /// Press and immediately release one key.

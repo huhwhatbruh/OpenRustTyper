@@ -137,6 +137,25 @@ fn the_package_builds_what_it_was_locked_to() {
 }
 
 #[test]
+fn the_local_build_script_extracts_into_the_directory_the_pkgbuild_expects() {
+    // `_srcdir` has to name the archive root, and the local build script
+    // creates that root itself. When they disagree, `cd "$_srcdir"` fails and
+    // the package cannot be built at all.
+    let pkg = pkgbuild();
+    let srcdir = pkg
+        .lines()
+        .find_map(|l| l.strip_prefix("_srcdir=\""))
+        .and_then(|v| v.strip_suffix('"'))
+        .expect("PKGBUILD names _srcdir");
+    let prefix = srcdir.replace("$pkgver", "");
+    let script = std::fs::read_to_string(packaging().join("build-local.sh")).unwrap();
+    assert!(
+        script.contains(&format!("--prefix=\"{prefix}$version/\"")),
+        "_srcdir is {srcdir:?}, but build-local.sh packages a different root"
+    );
+}
+
+#[test]
 fn the_package_version_matches_the_crate() {
     let manifest =
         std::fs::read_to_string(packaging().parent().unwrap().join("Cargo.toml")).unwrap();

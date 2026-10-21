@@ -8,7 +8,7 @@ model in the loop, and no telemetry. It reads text, it presses keys.
 
 ```bash
 openautotyper -f essay.txt --wpm 80      # from a file
-pbpaste | openautotyper --delay 3        # from a pipe
+wl-paste | openautotyper --delay 3       # from a pipe
 openautotyper-gui                        # or with a window
 ```
 
@@ -255,7 +255,7 @@ this device is virtual.
 
 ```
 src/
-  text.rs          normalization: line endings, typography, zero-width characters
+  text.rs          normalization: line endings, typography, control characters
   timing.rs        the cadence model — pure functions, no I/O
   clock.rs         drift-corrected, interruptible pacing
   session.rs       countdown, keystrokes, progress, guaranteed cleanup

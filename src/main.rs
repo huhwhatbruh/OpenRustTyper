@@ -20,7 +20,7 @@ use openautotyper::{clipboard, panic as abort_key, VERSION};
     name = "openautotyper",
     version = VERSION,
     about = "Type text into the focused window as real keystrokes.",
-    after_help = "examples:\n  openautotyper -f essay.txt --wpm 80\n  pbpaste | openautotyper --delay 3\n  openautotyper -t 'hello' --flat --wpm 200\n  openautotyper --doctor\n",
+    after_help = "examples:\n  openautotyper -f essay.txt --wpm 80\n  wl-paste | openautotyper --delay 3\n  openautotyper -t 'hello' --flat --wpm 200\n  openautotyper --doctor\n",
     disable_help_flag = false
 )]
 struct Args {
@@ -177,6 +177,9 @@ fn apply_overrides(settings: &mut Settings, args: &Args) -> Cadence {
         settings.hesitation = 0.0;
         settings.sentence_pause = 0.0;
         settings.drift = 0.0;
+        // A metronome with slips is not a metronome, and the help text promises
+        // every rhythm knob above is zeroed.
+        settings.typo_rate = 0.0;
     }
     let set = |slot: &mut f64, value: Option<f64>| {
         if let Some(v) = value {
@@ -402,7 +405,12 @@ fn main() -> ExitCode {
     let countdown = args.delay.unwrap_or(settings.countdown);
 
     let backend: Box<dyn backend::Backend> = if args.dry_run {
-        Box::new(NullBackend::default())
+        // A preview is only worth reading if it says what the real run would
+        // do. Giving the recorder the active layout's characters makes the
+        // clipboard fallback show up here as it would there, instead of
+        // accepting every character as reachable.
+        let reachable: String = xkb::load_layout().table.keys().collect();
+        Box::new(NullBackend::reaching(&reachable))
     } else {
         let wanted = args
             .backend
@@ -421,11 +429,21 @@ fn main() -> ExitCode {
     let panic_key = if args.no_panic_key {
         None
     } else {
-        Some(
-            args.panic_key
-                .clone()
-                .unwrap_or_else(|| settings.panic_key.clone()),
-        )
+        let asked = args
+            .panic_key
+            .clone()
+            .unwrap_or_else(|| settings.panic_key.clone());
+        // An empty value from a hand-edited config means "the default", not
+        // "invalid"; anything else is checked rather than silently replaced.
+        let asked = if asked.trim().is_empty() {
+            "KEY_ESC".to_string()
+        } else {
+            asked
+        };
+        match abort_key::resolve_key(&asked) {
+            Ok(key) => Some(key),
+            Err(e) => usage_error(&e),
+        }
     };
     let any_key = args.any_key_stops || settings.any_key_stops;
     let line = Arc::new(ProgressLine::new(!args.quiet && !args.dry_run));
@@ -442,8 +460,8 @@ fn main() -> ExitCode {
             } else {
                 panic_key.clone()
             },
-            any_key_stops: any_key,
-            on_progress: Some(Box::new(move |p| sink.show(&p))),
+            any_key_stops: if args.dry_run { false } else { any_key },
+            on_progress: Some(Arc::new(move |p| sink.show(&p))),
             seed: args.seed,
             // A dry run is a preview. Pacing it would make it take exactly as
             // long as the typing it is previewing, which is the one thing
@@ -520,21 +538,57 @@ fn main() -> ExitCode {
     let _ = watcher.join();
     line.clear();
 
-    if !args.quiet && !result.panic_active {
-        eprintln!("note: this ran with no abort key attached");
+    if !args.quiet && !args.dry_run && !result.panic_active && panic_key.is_none() && !any_key {
+        // Silently running without a kill switch is the one thing worth saying
+        // out loud even when nothing failed: --no-panic-key is easy to leave in
+        // a shell alias.
+        eprintln!("note: this run had no abort key attached \u{2014} Ctrl+C still works");
     }
 
     if args.dry_run {
         let typed = session.backend().recorded_text().unwrap_or_default();
-        print!("{typed}");
-        let _ = std::io::stdout().flush();
+        // `print!` panics when the far end of a pipe has gone away, and
+        // `openautotyper -n ... | head` is a legitimate way to read a preview.
+        let mut stdout = std::io::stdout();
+        match stdout
+            .write_all(typed.as_bytes())
+            .and_then(|()| stdout.flush())
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => eprintln!("could not write the preview: {e}"),
+        }
         if !args.quiet {
             eprintln!(
-                "\n-- dry run: {} characters, ~{}, text delivered exactly: {}",
+                "\n-- dry run: {} characters, ~{}",
                 grouped(result.typed),
-                format_duration(session.estimated),
-                if typed == text { "True" } else { "False" }
+                format_duration(session.estimated)
             );
+            let pasted = session.backend().pasted();
+            if !pasted.is_empty() {
+                // These are the characters the real run would route through
+                // the clipboard: slow, visible, and destructive to whatever
+                // the user had copied.
+                let count: usize = pasted.iter().map(|p| p.chars().count()).sum();
+                let mut shown = String::new();
+                for ch in pasted.iter().flat_map(|p| p.chars()) {
+                    if !shown.contains(ch) {
+                        shown.push(ch);
+                    }
+                }
+                let shown: String = shown.chars().take(20).collect();
+                let (ok, why) = clipboard::available();
+                if ok {
+                    eprintln!("  {count} character(s) would go through the clipboard: {shown:?}");
+                } else {
+                    eprintln!(
+                        "  {count} character(s) have no keystroke and the clipboard is \
+                         unavailable ({why}); a real run would skip them: {shown:?}"
+                    );
+                }
+            }
         }
         return ExitCode::SUCCESS;
     }
@@ -610,7 +664,10 @@ mod tests {
 
     #[test]
     fn flat_zeroes_the_rhythm_knobs() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            typo_rate: 0.2,
+            ..Default::default()
+        };
         let c = apply_overrides(&mut settings, &parse(&["--flat"]));
         assert_eq!(
             (
@@ -618,9 +675,10 @@ mod tests {
                 c.rhythm,
                 c.hesitation,
                 c.sentence_pause,
-                c.drift
+                c.drift,
+                c.typo_rate,
             ),
-            (0.0, 0.0, 0.0, 0.0, 0.0)
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         );
     }
 

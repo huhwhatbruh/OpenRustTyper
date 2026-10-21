@@ -17,6 +17,7 @@
 //! `UI_DEV_SETUP` changes that. The aim here is to stop announcing it, not to
 //! defeat an inspection.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -78,13 +79,26 @@ fn candidates(root: &str) -> Vec<Identity> {
         .collect();
     names.sort();
 
+    // Another uinput device, possibly one of ours, is not a candidate -- and
+    // every physical path the machine already reports is taken. The clone has
+    // to pick a port none of them uses, or it recreates the very contradiction
+    // it exists to avoid.
+    let bases: Vec<String> = names
+        .into_iter()
+        .map(|entry| format!("{root}/{entry}"))
+        .filter(|base| {
+            !fs::canonicalize(base).is_ok_and(|p| p.to_string_lossy().contains("/virtual/"))
+        })
+        .collect();
+    let mut taken: HashSet<String> = bases
+        .iter()
+        .map(|base| read(format!("{base}/phys")))
+        .filter(|phys| !phys.is_empty())
+        .collect();
+    taken.insert(FALLBACK_PHYS.to_string());
+
     let mut ranked: Vec<((u8, usize), Identity)> = Vec::new();
-    for entry in names {
-        let base = format!("{root}/{entry}");
-        // Another uinput device, possibly one of ours.
-        if fs::canonicalize(&base).is_ok_and(|p| p.to_string_lossy().contains("/virtual/")) {
-            continue;
-        }
+    for base in bases {
         let name = read(format!("{base}/name"));
         if name.is_empty() {
             continue;
@@ -121,7 +135,7 @@ fn candidates(root: &str) -> Vec<Identity> {
                 phys: if phys.is_empty() {
                     FALLBACK_PHYS.into()
                 } else {
-                    sibling_port(&phys)
+                    sibling_port_in(&phys, &taken)
                 },
                 source,
             },
@@ -161,17 +175,26 @@ fn bit(bitmap: &str, index: usize) -> bool {
     }
 }
 
-/// A USB port path next to `phys`, so the clone is not the same device.
+/// A USB port path next to `phys`, avoiding every path in `taken`.
 ///
 /// Two input nodes reporting the same name *and* the same physical path are a
 /// contradiction: one keyboard cannot be plugged into one port twice. Moving
-/// the port number makes the pair read as two keyboards of one model.
+/// the port number makes the pair read as two keyboards of one model -- but it
+/// must not land on the port of a *third* keyboard, which recreates the same
+/// impossible pair against that one.
 ///
 /// Matches `usb-<bus>-<port>[.<sub>...]/input<N>`.
-fn sibling_port(phys: &str) -> String {
-    parse_usb_phys(phys)
-        .map(|(bus, port, rest)| format!("usb-{bus}-{}{rest}", port % 8 + 1))
-        .unwrap_or_else(|| FALLBACK_PHYS.into())
+fn sibling_port_in(phys: &str, taken: &HashSet<String>) -> String {
+    let Some((bus, port, rest)) = parse_usb_phys(phys) else {
+        return FALLBACK_PHYS.into();
+    };
+    for step in 1..=8 {
+        let candidate = format!("usb-{bus}-{}{rest}", port % 8 + step);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    FALLBACK_PHYS.into()
 }
 
 fn parse_usb_phys(phys: &str) -> Option<(&str, u32, &str)> {
@@ -271,25 +294,61 @@ mod tests {
     #[test]
     fn a_sibling_port_differs_from_the_original() {
         assert_eq!(
-            sibling_port("usb-0000:00:14.0-10/input1"),
+            sibling_port_in("usb-0000:00:14.0-10/input1", &HashSet::new()),
             "usb-0000:00:14.0-3/input1"
         );
         assert_eq!(
-            sibling_port("usb-0000:00:14.0-2.4/input0"),
+            sibling_port_in("usb-0000:00:14.0-2.4/input0", &HashSet::new()),
             "usb-0000:00:14.0-3.4/input0"
         );
         assert_ne!(
-            sibling_port("usb-0000:00:14.0-7/input0"),
+            sibling_port_in("usb-0000:00:14.0-7/input0", &HashSet::new()),
             "usb-0000:00:14.0-7/input0"
         );
     }
 
     #[test]
+    fn a_clone_does_not_take_a_port_another_keyboard_uses() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_input(
+            dir.path(),
+            1,
+            "Plain Keyboard",
+            "3",
+            "7",
+            KEYS,
+            "usb-0000:00:14.0-2/input0",
+        );
+        fake_input(
+            dir.path(),
+            2,
+            "Other Keyboard",
+            "3",
+            "7",
+            KEYS,
+            "usb-0000:00:14.0-3/input0",
+        );
+        let id = for_root(dir.path().to_str().unwrap(), None);
+        assert_eq!(id.name, "Plain Keyboard");
+        // Port 3 is the other keyboard's; the clone moves past it.
+        assert_eq!(id.phys, "usb-0000:00:14.0-4/input0");
+    }
+
+    #[test]
     fn a_phys_that_is_not_usb_gets_the_fallback() {
-        assert_eq!(sibling_port("isa0060/serio0/input0"), FALLBACK_PHYS);
-        assert_eq!(sibling_port(""), FALLBACK_PHYS);
-        assert_eq!(sibling_port("usb-xyz!-2/input0"), FALLBACK_PHYS);
-        assert_eq!(sibling_port("usb-0000:00:14.0-2/inputX"), FALLBACK_PHYS);
+        assert_eq!(
+            sibling_port_in("isa0060/serio0/input0", &HashSet::new()),
+            FALLBACK_PHYS
+        );
+        assert_eq!(sibling_port_in("", &HashSet::new()), FALLBACK_PHYS);
+        assert_eq!(
+            sibling_port_in("usb-xyz!-2/input0", &HashSet::new()),
+            FALLBACK_PHYS
+        );
+        assert_eq!(
+            sibling_port_in("usb-0000:00:14.0-2/inputX", &HashSet::new()),
+            FALLBACK_PHYS
+        );
     }
 
     #[test]
@@ -396,7 +455,7 @@ mod tests {
         // model but moves the port, so the pair reads as two keyboards of one
         // model -- which is an ordinary thing to own.
         let real = "usb-0000:00:14.0-10/input1";
-        let sibling = sibling_port(real);
+        let sibling = sibling_port_in(real, &HashSet::new());
         assert_ne!(sibling, real);
         assert!(sibling.starts_with("usb-0000:00:14.0-"));
         assert!(sibling.ends_with("/input1"));

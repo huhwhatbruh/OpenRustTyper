@@ -14,6 +14,20 @@ const INVISIBLE: &[char] = &[
     '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}', '\u{00AD}', '\u{180E}', '\u{034F}',
 ];
 
+/// Unicode line separators and the other line endings a keyboard never produces.
+/// Left alone they are characters no layout can reach, so every one of them
+/// takes a clipboard round trip or is skipped; a person pressing Enter is what
+/// the source meant.
+const LINE_BREAKS: &[char] = &['\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'];
+
+/// Control characters: no keyboard produces them by pressing a key, and a stray
+/// escape sequence pasted into a terminal is worse than useless. Tab and newline
+/// are handled as real keys and are not controls here.
+fn is_control(ch: char) -> bool {
+    let code = ch as u32;
+    (code < 0x20 && ch != '\t' && ch != '\n') || (0x7F..=0x9F).contains(&code)
+}
+
 /// Typographic characters -> what a person typing on a keyboard would produce,
 /// with the Unicode name for the summary line.
 #[rustfmt::skip]
@@ -109,7 +123,7 @@ impl Normalized {
         }
         if !self.dropped.is_empty() {
             let total: usize = self.dropped.values().sum();
-            bits.push(format!("dropped {total} zero-width character(s)"));
+            bits.push(format!("dropped {total} invisible or control character(s)"));
         }
         bits.join("; ")
     }
@@ -156,7 +170,12 @@ pub fn normalize(raw: &str, opts: NormalizeOptions) -> Normalized {
 
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if INVISIBLE.contains(&ch) {
+        if LINE_BREAKS.contains(&ch) {
+            // Before `is_control`: \v, \f and \x85 are both.
+            out.push('\n');
+            continue;
+        }
+        if INVISIBLE.contains(&ch) || is_control(ch) {
             *dropped.entry(ch).or_insert(0) += 1;
             continue;
         }
@@ -246,6 +265,23 @@ mod tests {
         let n = norm("a\u{200B}b\u{FEFF}c");
         assert_eq!(n.text, "abc");
         assert_eq!(n.dropped.values().sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn unicode_line_separators_become_enters() {
+        // They are line endings, not characters any keyboard can produce.
+        assert_eq!(
+            norm("a\u{2028}b\u{2029}c\u{000B}d\u{000C}e\u{0085}f").text,
+            "a\nb\nc\nd\ne\nf"
+        );
+    }
+
+    #[test]
+    fn control_characters_are_dropped_rather_than_typed() {
+        // A pasted escape sequence must not become keystrokes in a terminal.
+        let n = norm("a\u{0000}b\u{001B}[31mc\u{007F}d");
+        assert_eq!(n.text, "ab[31mcd");
+        assert_eq!(n.dropped.values().sum::<usize>(), 3);
     }
 
     #[test]

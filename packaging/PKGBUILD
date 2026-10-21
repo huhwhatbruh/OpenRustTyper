@@ -28,7 +28,11 @@ source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # published tarball before building. Pin this before publishing to the AUR.
 sha256sums=('SKIP')
 
-_srcdir="OpenAutoTyper-$pkgver"
+# The directory GitHub puts inside the archive is named after the *repository*,
+# which is OpenRustTyper -- not after the program, which is OpenAutoTyper. The
+# old value matched the URL and not the archive, so `cd` failed on the first
+# release build. build-local.sh uses the same prefix; a test keeps them equal.
+_srcdir="OpenRustTyper-$pkgver"
 
 prepare() {
   cd "$_srcdir"

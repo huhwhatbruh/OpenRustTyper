@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -148,7 +149,9 @@ fn install_theme(ctx: &egui::Context) {
 // Presets and choices
 // ---------------------------------------------------------------------------
 
-/// A named speed setting. Each is a full cadence, not just a WPM.
+/// A named speed setting. Each is a full cadence, not just a WPM -- which means
+/// every knob, including the slip rate. Leaving slips out used to mean that
+/// choosing "Machine" after "Natural" kept mistyping and correcting.
 struct Preset {
     name: &'static str,
     wpm: f64,
@@ -158,14 +161,15 @@ struct Preset {
     sentence_pause: f64,
     max_pause: f64,
     drift: f64,
+    typo_rate: f64,
 }
 
 #[rustfmt::skip]
 const PRESETS: [Preset; 4] = [
-    Preset { name: "Careful", wpm: 45.0, variance: 0.34, rhythm: 1.0, hesitation: 0.05, sentence_pause: 0.75, max_pause: 2.6, drift: 1.0 },
-    Preset { name: "Natural", wpm: 70.0, variance: 0.30, rhythm: 1.0, hesitation: 0.03, sentence_pause: 0.55, max_pause: 1.8, drift: 1.0 },
-    Preset { name: "Brisk", wpm: 110.0, variance: 0.26, rhythm: 0.9, hesitation: 0.02, sentence_pause: 0.35, max_pause: 1.1, drift: 0.8 },
-    Preset { name: "Machine", wpm: 200.0, variance: 0.0, rhythm: 0.0, hesitation: 0.0, sentence_pause: 0.0, max_pause: 0.0, drift: 0.0 },
+    Preset { name: "Careful", wpm: 45.0, variance: 0.34, rhythm: 1.0, hesitation: 0.05, sentence_pause: 0.75, max_pause: 2.6, drift: 1.0, typo_rate: 0.0 },
+    Preset { name: "Natural", wpm: 70.0, variance: 0.30, rhythm: 1.0, hesitation: 0.03, sentence_pause: 0.55, max_pause: 1.8, drift: 1.0, typo_rate: 0.0 },
+    Preset { name: "Brisk", wpm: 110.0, variance: 0.26, rhythm: 0.9, hesitation: 0.02, sentence_pause: 0.35, max_pause: 1.1, drift: 0.8, typo_rate: 0.0 },
+    Preset { name: "Machine", wpm: 200.0, variance: 0.0, rhythm: 0.0, hesitation: 0.0, sentence_pause: 0.0, max_pause: 0.0, drift: 0.0, typo_rate: 0.0 },
 ];
 
 const PANIC_KEYS: [(&str, &str); 5] = [
@@ -182,6 +186,7 @@ impl Preset {
             && (s.variance - self.variance).abs() < 0.01
             && (s.rhythm - self.rhythm).abs() < 0.01
             && (s.sentence_pause - self.sentence_pause).abs() < 0.01
+            && (s.typo_rate - self.typo_rate).abs() < 0.0005
     }
 
     fn apply(&self, s: &mut Settings) {
@@ -192,6 +197,7 @@ impl Preset {
         s.sentence_pause = self.sentence_pause;
         s.max_pause = self.max_pause;
         s.drift = self.drift;
+        s.typo_rate = self.typo_rate;
     }
 }
 
@@ -249,6 +255,9 @@ pub struct App {
     status: String,
     fraction: f32,
     paused: bool,
+    /// The last TYPING snapshot, so Pause can redraw immediately: progress is
+    /// published after an event fires, and a paused run is waiting for one.
+    last_progress: Option<Progress>,
     backends: Vec<(&'static str, bool, String)>,
 }
 
@@ -278,6 +287,7 @@ impl App {
             status: String::new(),
             fraction: 0.0,
             paused: false,
+            last_progress: None,
             backends: backend::report(),
         };
         app.refresh_meta();
@@ -340,7 +350,15 @@ impl App {
             let label = PANIC_KEYS
                 .iter()
                 .find(|(_, k)| *k == self.settings.panic_key)
-                .map_or("Esc", |(l, _)| l);
+                .map_or_else(
+                    || {
+                        self.settings
+                            .panic_key
+                            .trim_start_matches("KEY_")
+                            .to_string()
+                    },
+                    |(l, _)| l.to_string(),
+                );
             format!("Press {label} on your keyboard at any time to stop.")
         };
     }
@@ -373,6 +391,16 @@ impl App {
             self.warn("Cannot start", e);
             return;
         }
+        // The saved key is checked rather than handed to the watcher, which
+        // would quietly watch Escape instead and leave the instruction the
+        // window prints doing nothing.
+        let panic_key = match abort_key::resolve_key(&settings.panic_key) {
+            Ok(key) => key,
+            Err(e) => {
+                self.warn("Cannot start", e);
+                return;
+            }
+        };
         let device = match backend::select(Some(&settings.backend)) {
             Ok(b) => b,
             Err(e) => {
@@ -383,6 +411,7 @@ impl App {
 
         self.fraction = 0.0;
         self.paused = false;
+        self.last_progress = None;
         let (tx, repaint) = (self.tx.clone(), ctx.clone());
         let worker = std::thread::Builder::new()
             .name("typing".into())
@@ -395,9 +424,9 @@ impl App {
                     device,
                     SessionOptions {
                         countdown: settings.countdown,
-                        panic_key: Some(settings.panic_key.clone()),
+                        panic_key: Some(panic_key.clone()),
                         any_key_stops: settings.any_key_stops,
-                        on_progress: Some(Box::new(move |p| {
+                        on_progress: Some(Arc::new(move |p| {
                             let _ = progress_tx.send(Msg::Progress(p));
                             progress_ctx.request_repaint();
                         })),
@@ -441,6 +470,13 @@ impl App {
             } else {
                 c.pause();
             }
+            // Progress is published after an event fires, and a paused run is
+            // waiting for one to fire -- so without this the label said "typing"
+            // until Resume.
+            self.paused = c.paused();
+            if let Some(p) = self.last_progress.clone() {
+                self.show_progress(&p);
+            }
         }
     }
 
@@ -479,20 +515,27 @@ impl App {
                 self.fraction = 0.0;
             }
             State::Typing | State::Paused => {
-                self.fraction = p.fraction() as f32;
                 self.paused = p.state == State::Paused;
-                let tag = if self.paused { "Paused \u{2014} " } else { "" };
-                self.status = format!(
-                    "{tag}{} of {} \u{b7} {} left \u{b7} {:.0} wpm",
-                    group(p.typed),
-                    group(p.total),
-                    format_duration(p.remaining),
-                    p.wpm()
-                );
+                self.last_progress = Some(p.clone());
+                self.show_progress(p);
             }
             // Terminal states arrive as `Finished`, which carries the detail.
             _ => {}
         }
+    }
+
+    /// Draw one TYPING snapshot, using the paused flag rather than the snapshot's
+    /// own state so Pause can be shown before the next event fires.
+    fn show_progress(&mut self, p: &Progress) {
+        self.fraction = p.fraction() as f32;
+        let tag = if self.paused { "Paused \u{2014} " } else { "" };
+        self.status = format!(
+            "{tag}{} of {} \u{b7} {} left \u{b7} {:.0} wpm",
+            group(p.typed),
+            group(p.total),
+            format_duration(p.remaining),
+            p.wpm()
+        );
     }
 
     fn on_finished(&mut self, r: RunResult) {
@@ -541,6 +584,7 @@ impl App {
             }
         }
         self.paused = false;
+        self.last_progress = None;
     }
 
     fn load_file(&mut self, ctx: &egui::Context) {
@@ -996,7 +1040,10 @@ impl App {
                     self.stop("stopped");
                 }
                 let label = if self.paused { "Resume" } else { "Pause" };
-                if ui.add_enabled(running, Button::new(label)).clicked() {
+                // Nothing to pause during the countdown; the first TYPING
+                // progress enables it.
+                let pause_ready = running && (self.last_progress.is_some() || self.paused);
+                if ui.add_enabled(pause_ready, Button::new(label)).clicked() {
                     self.toggle_pause();
                 }
                 let clicked = ui
@@ -1567,6 +1614,19 @@ mod tests {
             assert_eq!(matching, [preset.name]);
             assert!(s.cadence().validate().is_ok());
         }
+    }
+
+    #[test]
+    fn a_preset_clears_slips_left_on_by_the_previous_one() {
+        // Presets are full cadences, so picking one must set every knob.
+        let mut s = Settings {
+            typo_rate: 0.05,
+            ..Default::default()
+        };
+        let machine = PRESETS.iter().find(|p| p.name == "Machine").unwrap();
+        machine.apply(&mut s);
+        assert_eq!(s.typo_rate, 0.0);
+        assert!(machine.matches(&s));
     }
 
     #[test]
