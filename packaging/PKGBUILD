@@ -13,7 +13,9 @@ license=('MIT')
 # desktop entry that starts a program missing one of them is a button that does
 # nothing, so they are depends and not optdepends. The command line needs none
 # of them beyond libxkbcommon, which it falls back from if it is absent.
-depends=('gcc-libs' 'glibc' 'libglvnd' 'libx11' 'libxkbcommon' 'wayland')
+# The icon is installed into the hicolor hierarchy, so the package that owns
+# that hierarchy is a dependency too.
+depends=('gcc-libs' 'glibc' 'hicolor-icon-theme' 'libglvnd' 'libx11' 'libxkbcommon' 'wayland')
 makedepends=('cargo')
 # The clipboard is only a fallback for characters no keystroke can reach, and it
 # is tried in this order: wl-copy, xclip, xsel.

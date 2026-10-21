@@ -118,6 +118,10 @@ fn the_arch_package_installs_everything_the_entry_references() {
             "the window needs {lib}; it must be a depend"
         );
     }
+    assert!(
+        depends.contains("hicolor-icon-theme"),
+        "the icon lives in the hicolor hierarchy; its theme must be a depend"
+    );
     for shipped in [
         "openautotyper.desktop",
         "openautotyper.svg",
