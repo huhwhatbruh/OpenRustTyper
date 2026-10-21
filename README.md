@@ -247,8 +247,7 @@ kernel's own listing back to check it.
 **What it does not hide.** The kernel puts every uinput device under
 `/sys/devices/virtual/input/`, and nothing a userspace process passes to
 `UI_DEV_SETUP` changes that. Anything willing to follow the sysfs path knows
-this device is virtual. The aim is to stop announcing it, not to defeat an
-inspection, and no amount of work on this program will change that.
+this device is virtual. 
 
 ---
 
