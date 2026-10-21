@@ -105,6 +105,8 @@ packaging/build-local.sh          # writes dist/openautotyper-*.pkg.tar.zst
 sudo pacman -U dist/openautotyper-*.pkg.tar.zst
 ```
 
+`dist/` is generated build output and is not committed.
+
 ### Linux: one-time permission setup
 
 Creating a virtual keyboard needs write access to `/dev/uinput`, and the abort

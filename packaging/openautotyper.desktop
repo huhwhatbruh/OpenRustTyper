@@ -4,17 +4,16 @@ Name=OpenAutoTyper
 GenericName=Auto Typer
 Comment=Type text into the focused window as real keystrokes
 # TryExec is how the spec says "hide this launcher if the program is absent".
-# Without it, a menu entry for a GUI whose Qt bindings are missing is a button
-# that does nothing at all: the traceback goes to a terminal Terminal=false
-# never opens.
+# A launcher started from a menu has Terminal=false, so a GUI that cannot open
+# has nowhere to explain itself; this keeps the entry out of the menu instead.
 TryExec=openautotyper-gui
 Exec=openautotyper-gui
 Icon=openautotyper
 Terminal=false
-# Qt sets the Wayland app_id from setDesktopFileName("openautotyper"), which
-# matches this file's name; StartupWMClass covers X11 and XWayland, where the
-# WM_CLASS is ("openautotyper-gui", "OpenAutoTyper").
-StartupWMClass=OpenAutoTyper
+# egui/winit takes the Wayland app_id -- and X11's WM_CLASS -- from
+# with_app_id("openautotyper"), which also matches this file's name. That is
+# how a compositor pairs the window with its launcher and icon.
+StartupWMClass=openautotyper
 StartupNotify=true
 Categories=Utility;Accessibility;
 Keywords=type;typing;keyboard;automation;paste;

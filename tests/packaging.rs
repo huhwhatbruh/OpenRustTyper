@@ -87,10 +87,16 @@ fn the_icon_the_entry_names_is_one_the_package_ships() {
 #[test]
 fn the_window_title_matches_the_wayland_app_id_the_entry_expects() {
     // The compositor pairs a window with its launcher entry by app id, and the
-    // entry's file name is what it looks for.
+    // entry's file name is what it looks for. winit also puts the same id in
+    // X11's WM_CLASS, which StartupWMClass has to name.
     let gui = std::fs::read_to_string(packaging().parent().unwrap().join("src/gui.rs")).unwrap();
-    assert!(gui.contains(".with_app_id(\"openautotyper\")"));
-    assert!(packaging().join("openautotyper.desktop").is_file());
+    let app_id = gui
+        .split(".with_app_id(\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("gui.rs sets an app id");
+    assert_eq!(entries()["StartupWMClass"], app_id);
+    assert!(packaging().join(format!("{app_id}.desktop")).is_file());
 }
 
 #[test]
